@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "structural-fp"
+version = "0.1.0"
+requires-python = ">=3.9"
+dependencies = ["gurobipy", "numpy"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["structural_fp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
