@@ -1,8 +1,28 @@
+# 가상환경 (절대 업로드 금지)
 .venv/
+venv/
+env/
+
+# 파이썬 캐시
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+
+# 패키징 메타데이터
 *.egg-info/
 .pytest_cache/
+dist/
+build/
+
+# 환경변수 및 비밀키
+.env
+
+# macOS
 .DS_Store
+
+# 문서 및 메모 (로컬 전용)
+*.md
+*.pdf
+
+# 실험 결과 (로컬 전용)
 experiments/results/
-*.log
