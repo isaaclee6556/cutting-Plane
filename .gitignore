@@ -24,5 +24,10 @@ build/
 *.md
 *.pdf
 
-# 실험 결과 (로컬 전용)
+# 실험 결과 및 인스턴스 데이터 (로컬 전용, 용량 큼)
 experiments/results/
+experiments/minlplib/
+experiments/miplib_benchmark/
+*.mps
+*.mps.gz
+*.lp
