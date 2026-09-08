@@ -1,30 +1,30 @@
-# 가상환경 (절대 업로드 금지)
+# Virtual environments
 .venv/
 venv/
 env/
 
-# 파이썬 캐시
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 
-# 패키징 메타데이터
+# Packaging metadata
 *.egg-info/
 .pytest_cache/
 dist/
 build/
 
-# 환경변수 및 비밀키
+# Environment variables and secrets
 .env
 
 # macOS
 .DS_Store
 
-# 문서 및 메모 (로컬 전용)
+# Documents and notes (Local only)
 *.md
 *.pdf
 
-# 실험 결과 및 인스턴스 데이터 (로컬 전용, 용량 큼)
+# Experiment results and instance data (Local only, large files)
 experiments/results/
 experiments/minlplib/
 experiments/miplib_benchmark/
