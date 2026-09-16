@@ -26,7 +26,7 @@ from gurobipy import GRB
 
 from .bitops import Point
 from .structure_index import StructureIndex
-from .cuts import cuts_from_index, SymbolicCut
+from .cuts import cuts_from_index, SymbolicCut, VertexCut
 from .cut_pool import select_cuts
 
 
@@ -190,6 +190,7 @@ def feasibility_pump(
     max_iter: int = 200,
     verbose: bool = False,
     use_structural_cuts: bool = False,
+    use_no_good_cuts: bool = False,
     max_cuts_per_iter: int = 30,
     cut_tol: float = 1e-6,
     max_perturbations: int = 0,
@@ -205,8 +206,14 @@ def feasibility_pump(
     int_vars             : names of integer/binary variables; auto-detected if None.
     max_iter             : iteration cap.
     verbose              : print per-iteration info to stdout.
-    use_structural_cuts  : enable Milestone-5 structural cut generation.
-    max_cuts_per_iter    : max cuts added per iteration (efficacy-ranked).
+    use_structural_cuts  : enable Milestone-5 structural cut generation
+                           (all 7 structures, dominance-pruned).
+    use_no_good_cuts     : ablation baseline — add exactly one VertexCut
+                           (classic no-good cut) for the visited point z each
+                           iteration, instead of full structural cuts.
+                           Mutually exclusive with use_structural_cuts.
+    max_cuts_per_iter    : max cuts added per iteration (efficacy-ranked;
+                           only applies to use_structural_cuts).
     cut_tol              : minimum violation to consider a cut active.
     max_perturbations    : max cycle-breaking perturbations before giving up.
                            0 (default) means stop immediately on first cycle.
@@ -217,6 +224,11 @@ def feasibility_pump(
     -------
     FPResult — check .feasible, .solution, .cuts_added, .perturbations.
     """
+    if use_structural_cuts and use_no_good_cuts:
+        raise ValueError(
+            "use_structural_cuts and use_no_good_cuts are mutually exclusive"
+        )
+
     if int_vars is None:
         int_vars = _integer_var_names(model)
     sorted_ivars = sorted(int_vars)
@@ -304,6 +316,15 @@ def feasibility_pump(
 
             if verbose and selected:
                 print(f"[FP]   added {len(selected)} cuts (total {total_cuts})")
+
+        elif use_no_good_cuts:
+            z_mask = _to_bitmask(z_dict, sorted_ivars)
+            cut = VertexCut(z=z_mask, n=n_ivars)
+            _add_cut_to_relax(relax, cut, sorted_ivars)
+            total_cuts += 1
+
+            if verbose:
+                print(f"[FP]   added no-good cut (total {total_cuts})")
 
         # Step 6 — projection LP
         _set_projection_objective(relax, int_vars, z_dict)

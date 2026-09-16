@@ -3,7 +3,7 @@ import gurobipy as gp
 
 # 1. Load the instance file directly using Gurobi
 # (gurobipy.read handles both .mps and .lp formats seamlessly)
-instance_path = "/Users/isaac/Desktop/research_cutting_plane/experiments/miplib_benchmark/beasleyC3.mps.gz" # Change this path to test other instances
+instance_path = "/Users/isaac/Desktop/research_cutting_plane/experiments/academictimetablebig.mps.gz" # Change this path to test other instances
 model = gp.read(instance_path)
 
 # 2. Run Feasibility Pump and compare performance across settings
@@ -12,6 +12,9 @@ res_plain = feasibility_pump(model, max_iter=500)
 
 print("\n--- FP with Structural Cuts ---")
 res_cuts = feasibility_pump(model, use_structural_cuts=True, max_iter=500)
+
+print("\n--- FP with No-Good Cuts Only ---")
+res_no_good = feasibility_pump(model, use_no_good_cuts=True, max_iter=500)
 
 print("\n--- FP with Cuts & Perturbation ---")
 res_perturb = feasibility_pump(
@@ -28,5 +31,6 @@ res_perturb = feasibility_pump(
 # 3. Print out the final comparison summary
 print("\n=== Benchmark Summary ===")
 print(f"Plain        | Iterations: {res_plain.iterations}, Reason: {res_plain.reason}")
+print(f"No-Good      | Iterations: {res_no_good.iterations}, Reason: {res_no_good.reason}, Cuts Added: {res_no_good.cuts_added}")
 print(f"Cuts         | Iterations: {res_cuts.iterations}, Reason: {res_cuts.reason}, Cuts Added: {res_cuts.cuts_added}")
 print(f"Cuts+Perturb | Iterations: {res_perturb.iterations}, Reason: {res_perturb.reason}, Cuts Added: {res_perturb.cuts_added}, Perturbations: {res_perturb.perturbations}")

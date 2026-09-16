@@ -24,6 +24,9 @@ build/
 *.md
 *.pdf
 
+# Presentation materials (Local only)
+presentation/
+
 # Experiment results and instance data (Local only, large files)
 experiments/results/
 experiments/minlplib/
