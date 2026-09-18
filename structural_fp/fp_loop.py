@@ -207,7 +207,12 @@ def feasibility_pump(
     max_iter             : iteration cap.
     verbose              : print per-iteration info to stdout.
     use_structural_cuts  : enable Milestone-5 structural cut generation
-                           (all 7 structures, dominance-pruned).
+                           (all 7 structures, dominance-pruned). If no
+                           structural cut is violated at the current x_hat,
+                           falls back to an unconditional VertexCut for z
+                           so every rejected point is still guaranteed to
+                           be excluded going forward (matches the guarantee
+                           use_no_good_cuts always provides).
     use_no_good_cuts     : ablation baseline — add exactly one VertexCut
                            (classic no-good cut) for the visited point z each
                            iteration, instead of full structural cuts.
@@ -316,6 +321,22 @@ def feasibility_pump(
 
             if verbose and selected:
                 print(f"[FP]   added {len(selected)} cuts (total {total_cuts})")
+
+            # Fallback: select_cuts requires a cut to be violated at the
+            # current x_hat before it's added. On instances with many
+            # simultaneously-fractional variables, even the plain VertexCut
+            # for z can fail this check (sum of per-coordinate distances
+            # exceeds 1), so nothing gets added at all. A no-good cut's job
+            # is to guarantee z itself is never produced by the LP again —
+            # that guarantee must not depend on current LP geometry, so add
+            # it unconditionally whenever nothing else was selected.
+            if not selected:
+                fallback = VertexCut(z=z_mask, n=n_ivars)
+                _add_cut_to_relax(relax, fallback, sorted_ivars)
+                total_cuts += 1
+
+                if verbose:
+                    print(f"[FP]   no violated structural cut; added fallback no-good cut (total {total_cuts})")
 
         elif use_no_good_cuts:
             z_mask = _to_bitmask(z_dict, sorted_ivars)
