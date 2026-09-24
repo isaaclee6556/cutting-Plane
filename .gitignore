@@ -34,3 +34,7 @@ experiments/miplib_benchmark/
 *.mps
 *.mps.gz
 *.lp
+
+# Batch benchmark outputs (local only)
+experiments/benchmark_results.xlsx
+experiments/run_all_benchmarks.log
