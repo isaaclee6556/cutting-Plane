@@ -170,6 +170,8 @@ class FPResult:
     history       : sequence of rounded points (as sorted tuples) visited.
     cuts_added    : total structural cut constraints added to the LP.
     perturbations : number of cycle-breaking perturbations applied.
+    cuts_by_type  : {cut class name: count} of cuts added, e.g.
+                    {"VertexCut": 5, "EdgeCut": 2}. Sums to cuts_added.
     """
     feasible: bool
     solution: Optional[dict[str, int]]
@@ -178,6 +180,7 @@ class FPResult:
     history: list[tuple] = field(default_factory=list)
     cuts_added: int = 0
     perturbations: int = 0
+    cuts_by_type: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +262,7 @@ def feasibility_pump(
     visited: set[tuple] = set()
     history: list[tuple] = []
     total_cuts = 0
+    cuts_by_type: dict[str, int] = {}
     n_perturbations = 0
 
     for k in range(max_iter):
@@ -280,7 +284,7 @@ def feasibility_pump(
             if verbose:
                 print(f"[FP] feasible at iter {k}")
             return FPResult(True, z_dict, k + 1, "feasible", history,
-                            total_cuts, n_perturbations)
+                            total_cuts, n_perturbations, dict(cuts_by_type))
 
         # Step 4 — cycle detection with optional perturbation
         if z_key in visited:
@@ -288,7 +292,7 @@ def feasibility_pump(
                 if verbose:
                     print(f"[FP] cycle at iter {k}, no perturbations left")
                 return FPResult(False, None, k + 1, "cycle", history,
-                                total_cuts, n_perturbations)
+                                total_cuts, n_perturbations, dict(cuts_by_type))
             # Perturb: add noise to projection objective and reset visit set
             n_perturbations += 1
             visited.clear()
@@ -298,7 +302,7 @@ def feasibility_pump(
             relax.optimize()
             if relax.Status != GRB.OPTIMAL:
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
-                                total_cuts, n_perturbations)
+                                total_cuts, n_perturbations, dict(cuts_by_type))
             continue  # skip normal projection; go to next iteration
 
         visited.add(z_key)
@@ -317,6 +321,8 @@ def feasibility_pump(
 
             for cut in selected:
                 _add_cut_to_relax(relax, cut, sorted_ivars)
+                name = type(cut).__name__
+                cuts_by_type[name] = cuts_by_type.get(name, 0) + 1
             total_cuts += len(selected)
 
             if verbose and selected:
@@ -334,6 +340,7 @@ def feasibility_pump(
                 fallback = VertexCut(z=z_mask, n=n_ivars)
                 _add_cut_to_relax(relax, fallback, sorted_ivars)
                 total_cuts += 1
+                cuts_by_type["VertexCut"] = cuts_by_type.get("VertexCut", 0) + 1
 
                 if verbose:
                     print(f"[FP]   no violated structural cut; added fallback no-good cut (total {total_cuts})")
@@ -343,6 +350,7 @@ def feasibility_pump(
             cut = VertexCut(z=z_mask, n=n_ivars)
             _add_cut_to_relax(relax, cut, sorted_ivars)
             total_cuts += 1
+            cuts_by_type["VertexCut"] = cuts_by_type.get("VertexCut", 0) + 1
 
             if verbose:
                 print(f"[FP]   added no-good cut (total {total_cuts})")
@@ -352,9 +360,9 @@ def feasibility_pump(
         relax.optimize()
         if relax.Status != GRB.OPTIMAL:
             return FPResult(False, None, k + 1, "lp_infeasible", history,
-                            total_cuts, n_perturbations)
+                            total_cuts, n_perturbations, dict(cuts_by_type))
 
     if verbose:
         print(f"[FP] max_iter={max_iter} reached without feasible solution")
     return FPResult(False, None, max_iter, "max_iter", history,
-                    total_cuts, n_perturbations)
+                    total_cuts, n_perturbations, dict(cuts_by_type))
