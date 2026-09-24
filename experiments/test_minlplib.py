@@ -21,7 +21,7 @@ for ext in (".mps.gz", ".mps", ".lp.gz", ".lp"):
     if instance_name.endswith(ext):
         instance_name = instance_name[: -len(ext)]
         break
-model = gp.read(instance_path)
+model =gp.read(instance_path)
 instance_type = sys.argv[3] if len(sys.argv) > 3 else classify_type(model)
 
 # 2. Run Feasibility Pump and compare performance across settings

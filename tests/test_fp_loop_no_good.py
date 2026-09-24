@@ -91,3 +91,26 @@ class TestMutualExclusivity:
                 use_structural_cuts=True,
                 use_no_good_cuts=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# cuts_by_type breakdown
+# ---------------------------------------------------------------------------
+
+class TestCutsByType:
+    def test_no_good_only_vertex_cuts(self):
+        res = feasibility_pump(
+            make_fractional_cycle_milp(), max_iter=20, use_no_good_cuts=True
+        )
+        assert set(res.cuts_by_type) <= {"VertexCut"}
+        assert sum(res.cuts_by_type.values()) == res.cuts_added
+
+    def test_structural_breakdown_sums_to_cuts_added(self):
+        res = feasibility_pump(
+            make_covering_milp(n=10), max_iter=50, use_structural_cuts=True
+        )
+        assert sum(res.cuts_by_type.values()) == res.cuts_added
+
+    def test_plain_has_empty_breakdown(self):
+        res = feasibility_pump(make_covering_milp(n=6))
+        assert res.cuts_by_type == {}
