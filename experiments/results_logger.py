@@ -15,6 +15,7 @@ from openpyxl.styles import Font
 RESULTS_PATH = Path(__file__).parent / "benchmark_results.xlsx"
 MAIN_SHEET = "Benchmark Results"
 LARGE_SHEET = "Large Instances"
+PERTURB_SHEET = "Perturbation Results"
 HEADERS = ["Instance", "Type", "Method", "Iterations", "Cuts Added", "Perturbations", "Result", "Time", "비고"]
 COLUMN_WIDTHS = [22, 8, 16, 11, 11, 13, 14, 10, 45]
 
@@ -82,7 +83,7 @@ def log_results(instance_name: str, instance_type: str, rows: list[dict],
             r.get("perturbations", 0),
             r["reason"],
             format_duration(r["time_sec"]),
-            _remark(r["reason"], r.get("perturbations", 0)),
+            "; ".join(s for s in (_remark(r["reason"], r.get("perturbations", 0)), r.get("note", "")) if s),
         ])
 
     _finalize_sheet(ws)

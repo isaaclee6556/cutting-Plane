@@ -28,11 +28,15 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
-from results_logger import RESULTS_PATH, log_error, remove_instance_rows, format_duration, MAIN_SHEET, LARGE_SHEET
+from results_logger import (
+    RESULTS_PATH, log_error, remove_instance_rows, format_duration,
+    MAIN_SHEET, LARGE_SHEET, PERTURB_SHEET,
+)
 from instance_info import classify_type
 
 BENCHMARK_DIR = Path(__file__).parent / "miplib_benchmark"
 WORKER = Path(__file__).parent / "test_minlplib.py"
+PERTURB_WORKER = Path(__file__).parent / "test_minlplib_perturb.py"
 LOG_FILE = Path(__file__).parent / "run_all_benchmarks.log"
 
 # .mps.gz and .mps duplicates exist for many instances; prefer the .gz copy.
@@ -104,7 +108,8 @@ def log(msg: str) -> None:
         f.write(line + "\n")
 
 
-def run_one(path: Path, timeout: float, sheet_name: str, index: int, total: int) -> None:
+def run_one(path: Path, timeout: float, sheet_name: str, index: int, total: int,
+            worker: Path = WORKER) -> None:
     name = base_name(path)
     log(f"[{index}/{total}] {name} 시작...")
     t0 = time.perf_counter()
@@ -116,7 +121,7 @@ def run_one(path: Path, timeout: float, sheet_name: str, index: int, total: int)
 
     try:
         proc = subprocess.run(
-            [sys.executable, str(WORKER), str(path), sheet_name, inst_type],
+            [sys.executable, str(worker), str(path), sheet_name, inst_type],
             timeout=timeout,
             capture_output=True,
             text=True,
@@ -151,12 +156,31 @@ def main() -> None:
     parser.add_argument("--resume-not-run", action="store_true",
                          help="Resume instances marked not_run in the Large Instances sheet "
                               "(left over from an interrupted --rerun-timeouts run)")
+    parser.add_argument("--perturb", action="store_true",
+                         help="Run the all-with-perturbation comparison (test_minlplib_perturb.py) "
+                              "and log into the Perturbation Results sheet")
     args = parser.parse_args()
+
+    if args.perturb and (args.rerun_timeouts or args.resume_not_run):
+        parser.error("--perturb cannot be combined with --rerun-timeouts/--resume-not-run")
 
     instances = discover_instances()
     by_base = {base_name(p): p for p in instances}
+    worker = WORKER
 
-    if args.resume_not_run:
+    if args.perturb:
+        worker = PERTURB_WORKER
+        # Instances tracked in the Large Instances sheet are the big ones that timed out
+        # at 10 min; they are handled separately, so leave them out of this pass.
+        done = instances_in_sheet(PERTURB_SHEET)
+        large = instances_in_sheet(LARGE_SHEET)
+        targets = [p for p in instances if base_name(p) not in done | large]
+        if args.limit:
+            targets = targets[: args.limit]
+        target_sheet = PERTURB_SHEET
+        log(f"[perturb] 총 {len(instances)}개 인스턴스 중 {len(done)}개 이미 완료, Large 시트 {len(large)}개 제외, "
+            f"{len(targets)}개 실행 예정 (timeout={args.timeout}s)")
+    elif args.resume_not_run:
         pending = instances_with_status(LARGE_SHEET, {"not_run"})
         targets = [by_base[n] for n in sorted(pending) if n in by_base]
         if args.limit:
@@ -188,7 +212,7 @@ def main() -> None:
             f"(timeout={args.timeout}s)")
 
     for i, path in enumerate(targets, start=1):
-        run_one(path, args.timeout, target_sheet, i, len(targets))
+        run_one(path, args.timeout, target_sheet, i, len(targets), worker)
 
     log("=== 전체 배치 종료 ===")
 
