@@ -87,7 +87,7 @@ class TestEfficacy:
     def test_star_efficacy(self):
         # StarCut(z=0, leaves={0,1,2}): x0+x1+x2 >= 2
         # x_hat=(0.5,0.5,0.5): LHS=1.5, violation=0.5, ||a||=sqrt(3)
-        cut = StarCut(z=0, leaves=frozenset({0, 1, 2}))
+        cut = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3)
         x_hat = {0: 0.5, 1: 0.5, 2: 0.5}
         expected = 0.5 / math.sqrt(3)
         assert efficacy(cut, x_hat) == pytest.approx(expected, rel=1e-6)
@@ -142,7 +142,7 @@ class TestFilterByViolation:
         # StarCut(z=0, {0,1,2}): rhs=2 — violated by x_hat=(0.5,0.5,0.5) (LHS=1.5)
         # VertexCut(z=7, n=3): -x0-x1-x2 >= -2 — NOT violated (LHS=-1.5 > -2)
         cuts = [
-            StarCut(z=0, leaves=frozenset({0, 1, 2})),
+            StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3),
             VertexCut(z=7, n=3),
         ]
         x_hat = {0: 0.5, 1: 0.5, 2: 0.5}
@@ -162,7 +162,7 @@ class TestTopKByEfficacy:
         #   Vertex: violation=1-0.6=0.4, norm=sqrt(3) → efficacy=0.4/sqrt(3)
         #   Star:   violation=2-0.6=1.4, norm=sqrt(3) → efficacy=1.4/sqrt(3)
         self.vertex = VertexCut(z=0, n=3)
-        self.star   = StarCut(z=0, leaves=frozenset({0, 1, 2}))
+        self.star   = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3)
         self.x_hat  = {0: 0.2, 1: 0.2, 2: 0.2}
 
     def test_ranking_order(self):
@@ -256,8 +256,8 @@ class TestDominancePruneStar:
     def test_max_star_kept(self):
         # Two stars at center=0: one with 3 leaves, one with 2 (subset) → keep 3
         cuts = [
-            StarCut(z=0, leaves=frozenset({0, 1, 2})),
-            StarCut(z=0, leaves=frozenset({0, 1})),      # subset → dominated
+            StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3),
+            StarCut(z=0, leaves=frozenset({0, 1}), n=3),      # subset → dominated
         ]
         result = dominance_prune(cuts)
         assert len(result) == 1
@@ -265,8 +265,8 @@ class TestDominancePruneStar:
 
     def test_different_centers_both_kept(self):
         cuts = [
-            StarCut(z=0, leaves=frozenset({0, 1, 2})),
-            StarCut(z=7, leaves=frozenset({0, 1, 2})),
+            StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3),
+            StarCut(z=7, leaves=frozenset({0, 1, 2}), n=3),
         ]
         result = dominance_prune(cuts)
         assert len(result) == 2

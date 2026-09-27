@@ -143,32 +143,43 @@ class TestSquareCut:
 class TestStarCut:
     def test_coefficients_z0_L012(self):
         # z=0 (000), L={0,1,2}: delta_i=x_i → x0+x1+x2 >= 2
-        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2})).to_inequality()
+        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3).to_inequality()
         assert coeffs == {0: 1.0, 1: 1.0, 2: 1.0}
         assert rhs == pytest.approx(2.0)
 
-    def test_rhs_scales_with_L(self):
-        # |L|=4 → rhs = 3.0
-        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2, 3})).to_inequality()
-        assert rhs == pytest.approx(3.0)
+    def test_leaves_weight_1_outside_weight_2(self):
+        # n=5, L={0,1,2,3}: leaves get weight 1, the extra coordinate weight 2, rhs=2
+        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2, 3}), n=5).to_inequality()
+        assert coeffs == {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 2.0}
+        assert rhs == pytest.approx(2.0)
+
+    def test_excludes_exactly_the_star_points(self):
+        # Only z and z^i (i in L) violate; every other binary point satisfies.
+        n, z, L = 5, 0b10110, frozenset({0, 1, 3})
+        coeffs, rhs = StarCut(z=z, leaves=L, n=n).to_inequality()
+        star_pts = {z} | {z ^ (1 << i) for i in L}
+        for p in range(2 ** n):
+            x = {i: (p >> i) & 1 for i in range(n)}
+            lhs = sum(c * x[i] for i, c in coeffs.items())
+            assert (lhs < rhs - 1e-9) == (p in star_pts)
 
     def test_center_and_all_leaves_violate(self):
         # Center z=0 and each single-leaf neighbor must violate
-        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2})).to_inequality()
+        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3).to_inequality()
         for z_int in [0, 1, 2, 4]:  # 0, 0^bit0, 0^bit1, 0^bit2
             x = {i: (z_int >> i) & 1 for i in range(3)}
             assert_violates(coeffs, rhs, x)
 
     def test_two_leaf_points_satisfy(self):
         # Any binary point with >=2 bits set satisfies
-        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2})).to_inequality()
+        coeffs, rhs = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3).to_inequality()
         for z_int in [3, 5, 6, 7]:  # two or three bits set
             x = {i: (z_int >> i) & 1 for i in range(3)}
             assert_satisfies(coeffs, rhs, x)
 
     def test_z_mixed_star(self):
         # z=7 (111), L={0,1,2}: delta_i=1-x_i → -(x0+x1+x2)+3 >= 2 → -(x0+x1+x2) >= -1
-        coeffs, rhs = StarCut(z=7, leaves=frozenset({0, 1, 2})).to_inequality()
+        coeffs, rhs = StarCut(z=7, leaves=frozenset({0, 1, 2}), n=3).to_inequality()
         assert coeffs == {0: -1.0, 1: -1.0, 2: -1.0}
         assert rhs == pytest.approx(-1.0)
 

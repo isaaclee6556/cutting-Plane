@@ -94,15 +94,21 @@ class SquareCut:
 class StarCut:
     """
     Cut for a star (center z with |L| >= 3 leaf directions).
-    sum_{i in L} delta_i(x; z) >= |L| - 1
+    sum_{i in L} 1 * delta_i(x; z) + sum_{i not in L} 2 * delta_i(x; z) >= 2
     """
     z: Point
     leaves: frozenset   # L: set of direction indices
+    n: int              # 전체 차원 n 추가
 
     def to_inequality(self) -> CutRow:
         L = self.leaves
-        weighted = {i: 1.0 for i in L}
-        return _delta_to_x(self.z, weighted, float(len(L) - 1))
+        weighted: dict[int, float] = {}
+        for i in range(self.n):
+            if i in L:
+                weighted[i] = 1.0
+            else:
+                weighted[i] = 2.0
+        return _delta_to_x(self.z, weighted, 2.0)
 
 
 @dataclass(frozen=True)
@@ -218,7 +224,7 @@ def cuts_from_index(idx) -> list[SymbolicCut]:
 
     # Stars
     for center, d_mask in idx.stars.items():
-        result.append(StarCut(z=center, leaves=frozenset(bits(d_mask))))
+        result.append(StarCut(z=center, leaves=frozenset(bits(d_mask)), n=n))
 
     # Cubes
     for (min_corner, dirs), _ in idx.cubes.items():
