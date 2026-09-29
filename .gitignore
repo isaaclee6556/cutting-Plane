@@ -38,3 +38,9 @@ experiments/miplib_benchmark/
 # Batch benchmark outputs (local only)
 experiments/benchmark_results.xlsx
 experiments/run_all_benchmarks.log
+
+# Excel batch-logging infrastructure (local only)
+experiments/results_logger.py
+experiments/instance_info.py
+experiments/run_all_benchmarks.py
+experiments/update_instance_sizes.py

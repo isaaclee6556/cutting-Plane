@@ -10,7 +10,7 @@ import gurobipy as gp
 # When an instance_path is given (e.g. by run_all_benchmarks.py --perturb), results are
 # also appended to the Excel log; with no args it just prints, as before.
 instance_path = sys.argv[1] if len(sys.argv) > 1 else \
-    "/Users/isaac/Desktop/research_cutting_plane/experiments/miplib_benchmark/neos-1582420.mps.gz" # Change this path to test other instances
+    "/Users/isaac/Desktop/research_cutting_plane/experiments/miplib_benchmark/neos-827175.mps.gz" # Change this path to test other instances
 model = gp.read(instance_path)
 
 # 2. All three variants share the exact same perturbation settings, so the

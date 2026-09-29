@@ -14,7 +14,7 @@ import gurobipy as gp
 #   instance_type : "IP"/"MIP" if already known (e.g. from the batch runner);
 #                   otherwise computed here from the loaded model
 instance_path = sys.argv[1] if len(sys.argv) > 1 else \
-    r"C:\Users\isaac\OneDrive\Desktop\cutting-Plane-main\experiments\miplib_benchmark\rmatr100-p10.mps.gz"
+    r"C:\Users\isaac\OneDrive\Desktop\cutting-Plane-main\experiments\miplib_benchmark\air05.mps.gz"
 sheet_name = sys.argv[2] if len(sys.argv) > 2 else MAIN_SHEET
 instance_name = os.path.basename(instance_path)
 for ext in (".mps.gz", ".mps", ".lp.gz", ".lp"):
