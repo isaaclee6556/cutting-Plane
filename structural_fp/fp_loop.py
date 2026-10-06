@@ -26,7 +26,7 @@ from gurobipy import GRB
 
 from .bitops import Point
 from .structure_index import StructureIndex
-from .cuts import cuts_from_index, SymbolicCut, VertexCut
+from .cuts import cuts_from_index, CutRow, SymbolicCut, VertexCut
 from .cut_pool import select_cuts
 
 
@@ -49,11 +49,36 @@ def _to_bitmask(z_dict: dict[str, int], sorted_ivars: list[str]) -> Point:
     return mask
 
 
+def _require_binary(model: gp.Model, int_vars: list[str]) -> None:
+    """
+    Reject integer variables outside {0,1}: the cut formulas assume x in [0,1]
+    and _to_bitmask folds any nonzero value to 1, so such models would silently
+    produce invalid cuts.
+    """
+    by_name = {v.VarName: v for v in model.getVars()}
+    bad = []
+    for name in int_vars:
+        v = by_name[name]
+        if v.VType == GRB.BINARY:
+            continue
+        if v.VType == GRB.INTEGER and v.LB >= 0 and v.UB <= 1:
+            continue
+        bad.append(name)
+    if bad:
+        shown = ", ".join(bad[:5])
+        more = f" (+{len(bad) - 5} more)" if len(bad) > 5 else ""
+        raise ValueError(
+            f"structural/no-good cuts require 0/1 variables; {len(bad)} integer "
+            f"variable(s) have other bounds: {shown}{more}. Run without cut flags "
+            "(plain FP) to handle general integer variables."
+        )
+
+
 def _add_cut_to_relax(
     relax: gp.Model,
     cut: SymbolicCut,
     sorted_ivars: list[str],
-) -> None:
+) -> CutRow:
     """Add one symbolic cut as a linear constraint to the relaxation LP."""
     coeffs, rhs = cut.to_inequality()
     expr = gp.LinExpr()
@@ -63,6 +88,13 @@ def _add_cut_to_relax(
             if v is not None:
                 expr.addTerms(c, v)
     relax.addConstr(expr >= rhs)
+    return coeffs, rhs
+
+
+def _row_excludes(row: CutRow, z_mask: Point, tol: float = 1e-9) -> bool:
+    coeffs, rhs = row
+    lhs = sum(c * ((z_mask >> i) & 1) for i, c in coeffs.items())
+    return lhs < rhs - tol
 
 
 def _set_perturbed_objective(
@@ -172,6 +204,8 @@ class FPResult:
     perturbations : number of cycle-breaking perturbations applied.
     cuts_by_type  : {cut class name: count} of cuts added, e.g.
                     {"VertexCut": 5, "EdgeCut": 2}. Sums to cuts_added.
+    fallback_cuts : VertexCuts added only to guarantee the visited point is
+                    excluded (structural mode); already included in cuts_added.
     """
     feasible: bool
     solution: Optional[dict[str, int]]
@@ -181,6 +215,7 @@ class FPResult:
     cuts_added: int = 0
     perturbations: int = 0
     cuts_by_type: dict[str, int] = field(default_factory=dict)
+    fallback_cuts: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +234,7 @@ def feasibility_pump(
     max_perturbations: int = 0,
     perturb_scale: float = 0.3,
     random_seed: Optional[int] = None,
+    debug_check_cover: bool = False,
 ) -> FPResult:
     """
     Feasibility pump with optional structural cuts and cycle-breaking perturbation.
@@ -210,12 +246,11 @@ def feasibility_pump(
     max_iter             : iteration cap.
     verbose              : print per-iteration info to stdout.
     use_structural_cuts  : enable Milestone-5 structural cut generation
-                           (all 7 structures, dominance-pruned). If no
-                           structural cut is violated at the current x_hat,
-                           falls back to an unconditional VertexCut for z
-                           so every rejected point is still guaranteed to
-                           be excluded going forward (matches the guarantee
-                           use_no_good_cuts always provides).
+                           (all 7 structures, dominance-pruned). Invariant:
+                           after each insertion, the newly visited z is
+                           excluded by at least one row added so far; if
+                           none is, an unconditional VertexCut(z) is added.
+                           Requires 0/1 variables (see _require_binary).
     use_no_good_cuts     : ablation baseline — add exactly one VertexCut
                            (classic no-good cut) for the visited point z each
                            iteration, instead of full structural cuts.
@@ -227,6 +262,8 @@ def feasibility_pump(
                            0 (default) means stop immediately on first cycle.
     perturb_scale        : noise magnitude added to projection coefficients.
     random_seed          : seed for the perturbation RNG (None = non-deterministic).
+    debug_check_cover    : (tests/debugging) after each structural insertion, assert
+                           every visited point is excluded by some added row.
 
     Returns
     -------
@@ -239,6 +276,8 @@ def feasibility_pump(
 
     if int_vars is None:
         int_vars = _integer_var_names(model)
+    if use_structural_cuts or use_no_good_cuts:
+        _require_binary(model, int_vars)
     sorted_ivars = sorted(int_vars)
     n_ivars = len(sorted_ivars)
 
@@ -263,6 +302,8 @@ def feasibility_pump(
     history: list[tuple] = []
     total_cuts = 0
     cuts_by_type: dict[str, int] = {}
+    fallback_cuts = 0
+    added_rows: list[CutRow] = []
     n_perturbations = 0
 
     for k in range(max_iter):
@@ -284,7 +325,7 @@ def feasibility_pump(
             if verbose:
                 print(f"[FP] feasible at iter {k}")
             return FPResult(True, z_dict, k + 1, "feasible", history,
-                            total_cuts, n_perturbations, dict(cuts_by_type))
+                            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts)
 
         # Step 4 — cycle detection with optional perturbation
         if z_key in visited:
@@ -292,7 +333,7 @@ def feasibility_pump(
                 if verbose:
                     print(f"[FP] cycle at iter {k}, no perturbations left")
                 return FPResult(False, None, k + 1, "cycle", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type))
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts)
             # Perturb: add noise to projection objective and reset visit set
             n_perturbations += 1
             visited.clear()
@@ -302,7 +343,7 @@ def feasibility_pump(
             relax.optimize()
             if relax.Status != GRB.OPTIMAL:
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type))
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts)
             continue  # skip normal projection; go to next iteration
 
         visited.add(z_key)
@@ -320,7 +361,7 @@ def feasibility_pump(
             selected = select_cuts(all_cuts, x_hat_idx, k=max_cuts_per_iter, tol=cut_tol)
 
             for cut in selected:
-                _add_cut_to_relax(relax, cut, sorted_ivars)
+                added_rows.append(_add_cut_to_relax(relax, cut, sorted_ivars))
                 name = type(cut).__name__
                 cuts_by_type[name] = cuts_by_type.get(name, 0) + 1
             total_cuts += len(selected)
@@ -328,22 +369,25 @@ def feasibility_pump(
             if verbose and selected:
                 print(f"[FP]   added {len(selected)} cuts (total {total_cuts})")
 
-            # Fallback: select_cuts requires a cut to be violated at the
-            # current x_hat before it's added. On instances with many
-            # simultaneously-fractional variables, even the plain VertexCut
-            # for z can fail this check (sum of per-coordinate distances
-            # exceeds 1), so nothing gets added at all. A no-good cut's job
-            # is to guarantee z itself is never produced by the LP again —
-            # that guarantee must not depend on current LP geometry, so add
-            # it unconditionally whenever nothing else was selected.
-            if not selected:
-                fallback = VertexCut(z=z_mask, n=n_ivars)
-                _add_cut_to_relax(relax, fallback, sorted_ivars)
+            # Cover guarantee: z must be excluded by some row added so far.
+            # Dominated or unviolated cuts may leave z uncovered, so add its
+            # VertexCut unconditionally in that case.
+            if not any(_row_excludes(r, z_mask) for r in added_rows):
+                added_rows.append(_add_cut_to_relax(relax, VertexCut(z=z_mask, n=n_ivars), sorted_ivars))
                 total_cuts += 1
+                fallback_cuts += 1
                 cuts_by_type["VertexCut"] = cuts_by_type.get("VertexCut", 0) + 1
 
                 if verbose:
-                    print(f"[FP]   no violated structural cut; added fallback no-good cut (total {total_cuts})")
+                    print(f"[FP]   z not excluded by any row; added VertexCut (total {total_cuts})")
+
+            if debug_check_cover:
+                uncovered = [p for p in idx.H if not any(_row_excludes(r, p) for r in added_rows)]
+                if uncovered:
+                    raise AssertionError(
+                        f"cover invariant violated at iter {k}: {len(uncovered)} visited "
+                        f"point(s) not excluded by any added row, e.g. masks {uncovered[:5]}"
+                    )
 
         elif use_no_good_cuts:
             z_mask = _to_bitmask(z_dict, sorted_ivars)
@@ -360,9 +404,9 @@ def feasibility_pump(
         relax.optimize()
         if relax.Status != GRB.OPTIMAL:
             return FPResult(False, None, k + 1, "lp_infeasible", history,
-                            total_cuts, n_perturbations, dict(cuts_by_type))
+                            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts)
 
     if verbose:
         print(f"[FP] max_iter={max_iter} reached without feasible solution")
     return FPResult(False, None, max_iter, "max_iter", history,
-                    total_cuts, n_perturbations, dict(cuts_by_type))
+                    total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts)
