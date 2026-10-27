@@ -30,6 +30,15 @@ t0 = time.perf_counter()
 res_plain = feasibility_pump(model, max_iter=500)
 time_plain = time.perf_counter() - t0
 
+# Batch runner passes "plain_only" as the 4th arg for instances with general
+# integer variables, where the cut modes are skipped by the binary guard.
+if len(sys.argv) > 4 and sys.argv[4] == "plain_only":
+    log_results(instance_name, instance_type, [
+        {"method": "Plain", "iterations": res_plain.iterations, "cuts_added": 0,
+         "perturbations": 0, "reason": res_plain.reason, "time_sec": time_plain},
+    ], sheet_name=sheet_name)
+    sys.exit(0)
+
 print("\n--- FP with Structural Cuts ---")
 t0 = time.perf_counter()
 res_cuts = feasibility_pump(model, use_structural_cuts=True, max_iter=500)

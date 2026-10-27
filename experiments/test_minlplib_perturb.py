@@ -28,6 +28,19 @@ t0 = time.perf_counter()
 res_plain = feasibility_pump(model, **COMMON)
 time_plain = time.perf_counter() - t0
 
+if len(sys.argv) > 4 and sys.argv[4] == "plain_only":
+    from results_logger import log_results
+    instance_name = os.path.basename(instance_path)
+    for ext in (".mps.gz", ".mps", ".lp.gz", ".lp"):
+        if instance_name.endswith(ext):
+            instance_name = instance_name[: -len(ext)]
+            break
+    log_results(instance_name, sys.argv[3], [
+        {"method": "Plain+Perturb", "iterations": res_plain.iterations, "cuts_added": 0,
+         "perturbations": res_plain.perturbations, "reason": res_plain.reason, "time_sec": time_plain},
+    ], sheet_name=sys.argv[2])
+    sys.exit(0)
+
 print("\n--- No-Good Cuts + Perturbation ---")
 t0 = time.perf_counter()
 res_no_good = feasibility_pump(model, use_no_good_cuts=True, **COMMON)
