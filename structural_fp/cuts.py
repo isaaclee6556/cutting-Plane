@@ -114,11 +114,18 @@ class StarCut:
 @dataclass(frozen=True)
 class CubeCut:
     """
-    Cut for a 3-cube (8 corners).
+    Cut for a k-face of the hypercube (2^k corners, all confirmed outside X).
     sum_{i not in free} delta_i(x; z) >= 1
+
+    The spec's "cube" structure (detected incrementally via StructureIndex)
+    always has |free| == 3, but the formula itself is valid for any k — it
+    only requires that every one of the 2^k corners of the face spanned by
+    `free` (with z as the all-zero/base corner on those directions) lies
+    outside X. fp_loop's face-probe step (face_k param) uses this generality
+    to build cuts with |free| != 3 directly, bypassing structure_index.
     """
     z: Point
-    free: frozenset   # {a, b, c}: the three free directions
+    free: frozenset   # free directions spanning the face (size k, k>=1)
     n: int
 
     def to_inequality(self) -> CutRow:
