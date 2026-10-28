@@ -74,13 +74,13 @@ def _require_binary(model: gp.Model, int_vars: list[str]) -> None:
         )
 
 
-def _add_cut_to_relax(
+def _add_row_to_relax(
     relax: gp.Model,
-    cut: SymbolicCut,
+    coeffs: dict[int, float],
+    rhs: float,
     sorted_ivars: list[str],
 ) -> CutRow:
-    """Add one symbolic cut as a linear constraint to the relaxation LP."""
-    coeffs, rhs = cut.to_inequality()
+    """Add one (coeffs, rhs) row as a linear constraint to the relaxation LP."""
     expr = gp.LinExpr()
     for i, c in coeffs.items():
         if i < len(sorted_ivars):
@@ -89,6 +89,21 @@ def _add_cut_to_relax(
                 expr.addTerms(c, v)
     relax.addConstr(expr >= rhs)
     return coeffs, rhs
+
+
+def _add_cut_to_relax(
+    relax: gp.Model,
+    cut: SymbolicCut,
+    sorted_ivars: list[str],
+) -> CutRow:
+    """Add one symbolic cut as a linear constraint to the relaxation LP."""
+    coeffs, rhs = cut.to_inequality()
+    return _add_row_to_relax(relax, coeffs, rhs, sorted_ivars)
+
+
+def _row_key(coeffs: dict[int, float], rhs: float) -> tuple:
+    """Hashable identity for a row, used to skip exact-duplicate cuts."""
+    return (tuple(sorted(coeffs.items())), rhs)
 
 
 def _row_excludes(row: CutRow, z_mask: Point, tol: float = 1e-9) -> bool:
@@ -239,7 +254,7 @@ def feasibility_pump(
     random_seed: Optional[int] = None,
     debug_check_cover: bool = False,
     use_face_probe: bool = False,
-    face_k: int = 4,
+    face_k: int = 3,
 ) -> FPResult:
     """
     Feasibility pump with optional structural cuts and cycle-breaking perturbation.
@@ -449,14 +464,28 @@ def feasibility_pump(
             all_cuts = cuts_from_index(idx)
             selected = select_cuts(all_cuts, x_hat_idx, k=max_cuts_per_iter, tol=cut_tol)
 
+            # Exact-duplicate guard: dominance_prune only sees candidates
+            # from idx, so it can't know about rows added outside this call
+            # (e.g. the face-probe CubeCut just added above). When
+            # StructureIndex re-detects that same face as a native cube
+            # (always happens when face_k == 3, its own cube size), this
+            # row-level check is what actually stops it being added twice.
+            added_row_keys = {_row_key(c, r) for c, r in added_rows}
+            n_added = 0
             for cut in selected:
-                added_rows.append(_add_cut_to_relax(relax, cut, sorted_ivars))
+                coeffs, rhs = cut.to_inequality()
+                key = _row_key(coeffs, rhs)
+                if key in added_row_keys:
+                    continue
+                added_row_keys.add(key)
+                added_rows.append(_add_row_to_relax(relax, coeffs, rhs, sorted_ivars))
                 name = type(cut).__name__
                 cuts_by_type[name] = cuts_by_type.get(name, 0) + 1
-            total_cuts += len(selected)
+                n_added += 1
+            total_cuts += n_added
 
-            if verbose and selected:
-                print(f"[FP]   added {len(selected)} cuts (total {total_cuts})")
+            if verbose and n_added:
+                print(f"[FP]   added {n_added} cuts (total {total_cuts})")
 
             # Cover guarantee: z must be excluded by some row added so far.
             # Dominated or unviolated cuts may leave z uncovered, so add its

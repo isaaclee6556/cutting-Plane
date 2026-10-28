@@ -44,6 +44,20 @@ def star_index(n=3) -> StructureIndex:
     return idx
 
 
+def embedded_cube_index(n=5, free=(0, 1, 2)) -> StructureIndex:
+    """StructureIndex with one 3-cube spanning `free`, embedded in a larger
+    space (n > len(free)) so the cube's own inequality is a real,
+    non-vacuous constraint (at least one direction stays outside `free`)."""
+    idx = StructureIndex(n=n)
+    for combo in range(8):
+        p = 0
+        for j, pos in enumerate(free):
+            if (combo >> j) & 1:
+                p |= 1 << pos
+        idx.insert(p)
+    return idx
+
+
 def full_cube_index(n=3) -> StructureIndex:
     """StructureIndex with all 8 points, n=3."""
     idx = StructureIndex(n=n)
@@ -248,6 +262,59 @@ class TestDominancePruneCubeSquare:
         assert not any(isinstance(c, VertexCut) for c in result)
         assert not any(isinstance(c, EdgeCut) for c in result)
         assert not any(isinstance(c, SquareCut) for c in result)
+
+
+class TestDominancePruneCubeStarTulip:
+    """
+    Cube cuts dominate Star/Tulip cuts anchored at their own corners, when
+    the star's/tulip's directions are confined to the cube's free dirs.
+
+    This guards against fp_loop's face-probe step: inserting all 2^k
+    corners of a face at once (face_k=3) simultaneously re-detects the
+    identical cube AND forms a Star + Tulip at every one of those corners
+    (each corner has exactly 3 freshly-created edges), so without this
+    rule a single face-probe cut would be shadowed by up to 16 redundant
+    weaker cuts.
+    """
+
+    def test_embedded_cube_prunes_its_own_star_and_tulip(self):
+        idx = embedded_cube_index(n=5, free=(0, 1, 2))
+        cuts = cuts_from_index(idx)
+        # Sanity: the raw (unpruned) pool really does contain the echo
+        # this rule is meant to remove.
+        assert any(isinstance(c, StarCut) for c in cuts)
+        assert any(isinstance(c, TulipCut) for c in cuts)
+
+        result = dominance_prune(cuts)
+        cube_cuts = [c for c in result if isinstance(c, CubeCut)]
+        assert len(cube_cuts) == 1
+        assert not any(isinstance(c, StarCut) for c in result)
+        assert not any(isinstance(c, TulipCut) for c in result)
+
+    def test_star_with_leaf_outside_free_survives(self):
+        # Star's leaves are not a subset of the cube's free dirs -> the
+        # dominance proof doesn't apply, so it must survive.
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2}), n=5)
+        star = StarCut(z=0, leaves=frozenset({0, 1, 3}), n=5)
+        result = dominance_prune([cube, star])
+        assert any(isinstance(c, StarCut) for c in result)
+
+    def test_tulip_anchored_off_cube_survives(self):
+        # Tulip's anchor disagrees with the cube's base outside free (bit 3
+        # differs) -> not one of the cube's own corners, so it must survive.
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2}), n=5)
+        tulip = TulipCut(z=0b01000, K=frozenset({0, 1, 2}), L=frozenset(), n=5)
+        result = dominance_prune([cube, tulip])
+        assert any(isinstance(c, TulipCut) for c in result)
+
+    def test_degenerate_full_free_cube_keeps_stars(self):
+        # free spans every direction (n == len(free)): cc's inequality is
+        # the unsatisfiable "0 >= 1", so it must not be used to prune
+        # anything (also covered by TestDominancePruneCubeSquare above).
+        idx = full_cube_index()  # n=3, free={0,1,2}
+        cuts = cuts_from_index(idx)
+        result = dominance_prune(cuts)
+        assert any(isinstance(c, StarCut) for c in result)
 
 
 class TestDominancePruneStar:

@@ -209,7 +209,7 @@ def main() -> None:
                     help="max perturbations for the +P columns (all modes)")
     ap.add_argument("--perturb-scale", type=float, default=0.5)
     ap.add_argument("--seed",          type=int,   default=0)
-    ap.add_argument("--face-k",        type=int,   default=4,
+    ap.add_argument("--face-k",        type=int,   default=3,
                     help="face_k for the StructFP/StructFP+P columns (use_face_probe)")
     ap.add_argument("--instances", nargs="+", metavar="NAME",
                      help="run only these instances (see --list-instances for valid names); "

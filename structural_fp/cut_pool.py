@@ -91,6 +91,15 @@ def _cube_corners(cc: CubeCut) -> frozenset:
     ])
 
 
+def _agrees_outside(p: int, q: int, dirs: frozenset, n: int) -> bool:
+    """True if p and q have identical bits at every position not in `dirs`."""
+    mask = 0
+    for i in dirs:
+        mask |= bit(i)
+    outside = ((1 << n) - 1) & ~mask
+    return (p & outside) == (q & outside)
+
+
 # ---------------------------------------------------------------------------
 # Dominance pruning
 # ---------------------------------------------------------------------------
@@ -101,6 +110,9 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
 
     Dominance hierarchy (stronger cuts make weaker ones redundant):
       Cube  >  Square  >  Edge  >  Vertex
+      Cube  >  Star, Tulip anchored at one of the cube's own corners
+               (only when the star's leaves / the tulip's K|L lie entirely
+               within the cube's free directions — see proof below).
       Star, Tulip, Propeller: keep only the maximal structure per anchor.
 
     A cut A dominates B when: every x satisfying A also satisfies B
@@ -111,6 +123,21 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
                 if LHS_edge >= 1 then LHS_vertex = LHS_edge + delta_a >= 1.
       SquareCut removes two directions → dominates both edge cuts on those axes.
       CubeCut   removes three directions → dominates all 6 face squares.
+      Cube > Star/Tulip: let cc = CubeCut(base, free). A StarCut/TulipCut
+      anchored at corner c with c agreeing with base outside `free` (i.e. c
+      is one of the cube's own 2^|free| corners), and whose leaves (Star: L;
+      Tulip: K ∪ L) are a subset of `free`, has every direction outside
+      `free` in its *unweighted* (highest-coefficient) group. Since
+      delta_i(x;c) == delta_i(x;base) for i outside free (c and base share
+      those bits), that group's sum is >= cc's own LHS, which is >= 1 by
+      cc's inequality. Star weights that group by 2 (rhs 2) and Tulip by 3
+      (rhs 3), so 2*1 >= 2 and 3*1 >= 3 — the weaker cut's inequality holds
+      automatically whenever cc's does. This matters because fp_loop's
+      face-probe step inserts all 2^k corners of a face at once: besides
+      re-detecting the same cube, that simultaneously satisfies the Star
+      trigger (popcount(D) >= 3) and the Tulip trigger at every one of the
+      corners it just added, so without this rule each face-probe cut would
+      be shadowed by up to 2*2^k redundant Star/Tulip cuts.
     """
     dominated: set[int] = set()  # id() of dominated cut objects
 
@@ -165,6 +192,31 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
             if sc.free <= cc.free:
                 dominated.add(id(sc))
                 break
+
+    # --- Cube > Star/Tulip anchored at one of the cube's own corners ---
+    # See the proof in the docstring above. Only applies when the anchor
+    # agrees with the cube's base outside `free` (it's one of the cube's
+    # own corners) and the star's/tulip's directions are confined to `free`.
+    for cc in cube_cuts:
+        if len(cc.free) >= cc.n:
+            # Degenerate case: free spans every direction, so cc's own
+            # inequality is "0 >= 1" over an empty sum — never satisfiable
+            # by any x. The dominance argument is vacuously true (cc's
+            # feasible set is empty) but operationally meaningless here:
+            # adding cc already makes the relaxation infeasible outright,
+            # so there is nothing to gain by also pruning Star/Tulip based
+            # on it (and tests pin the current behavior of keeping them).
+            continue
+        for sc in star_cuts:
+            if id(sc) in dominated:
+                continue
+            if sc.leaves <= cc.free and _agrees_outside(sc.z, cc.z, cc.free, cc.n):
+                dominated.add(id(sc))
+        for tc in tulip_cuts:
+            if id(tc) in dominated:
+                continue
+            if (tc.K | tc.L) <= cc.free and _agrees_outside(tc.z, cc.z, cc.free, cc.n):
+                dominated.add(id(tc))
 
     # --- Star: keep only the max-leaf-set per center ---
     star_best: dict[int, StarCut] = {}

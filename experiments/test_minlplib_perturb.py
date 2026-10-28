@@ -62,7 +62,7 @@ COMMON = dict(
     random_seed=42,
     verbose=False,   # set True to print per-iteration z vectors (very long on big instances)
 )
-FACE_K = 4   # face_k for the Structural+FaceProbe+Perturb run (use_face_probe)
+FACE_K = 3   # face_k for the Structural+FaceProbe+Perturb run (use_face_probe)
 
 print("--- Plain FP + Perturbation ---")
 res_plain, time_plain = run_with_timeout("Plain+Perturb", **COMMON)

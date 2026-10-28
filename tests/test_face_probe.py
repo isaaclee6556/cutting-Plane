@@ -76,3 +76,30 @@ class TestFaceProbe:
             max_iter=50, debug_check_cover=True,
         )
         assert isinstance(res, FPResult)
+
+
+class TestFaceProbeNoEcho:
+    """
+    face_k == 3 (the default) matches StructureIndex's native cube size
+    exactly, so inserting all 8 corners of a probed face also re-detects
+    that identical cube — and a Star + Tulip at every one of those 8
+    corners — through the normal cuts_from_index/select_cuts path.
+    Regression test for the dominance_prune (Cube > Star/Tulip) rule and
+    fp_loop's exact-duplicate-row guard that keep this from silently
+    doubling (or ~17x-ing) the reported cut count for what is
+    conceptually a single face-probe cut.
+    """
+
+    def test_default_face_k_adds_no_duplicate_or_echo_cuts(self):
+        res = feasibility_pump(
+            make_random_covering_milp(n=40, m=35, seed=1),
+            use_structural_cuts=True, use_face_probe=True,  # face_k defaults to 3
+            max_cuts_per_iter=30, cut_tol=1e-6, debug_check_cover=True,
+            max_perturbations=5, perturb_scale=0.4, random_seed=1, max_iter=30,
+        )
+        assert res.face_probe_cuts >= 1
+        # Every cut added this run came from the unconditional face-probe
+        # CubeCut -- none leaked in via select_cuts (duplicate cube, or
+        # Star/Tulip echoes anchored at the same 8 corners).
+        assert res.cuts_added == res.face_probe_cuts
+        assert res.cuts_by_type == {"CubeCut": res.face_probe_cuts}
