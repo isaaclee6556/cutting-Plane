@@ -1,8 +1,48 @@
 import os
+import signal
 import sys
 import time
-from structural_fp import feasibility_pump
+from structural_fp import feasibility_pump, FPResult
 import gurobipy as gp
+
+
+# Per-method wall-clock budget (seconds). run_all_benchmarks.py already caps the
+# whole subprocess (all 4 methods), but that granularity means one slow method
+# (typically Structural+FaceProbe on an instance with many int vars, since it
+# does up to 2**face_k feasibility checks per iteration) wastes the results of
+# the other 3. Guarding each call individually keeps the other methods' results
+# even when one of them times out. Override with the FP_METHOD_TIMEOUT env var.
+PER_METHOD_TIMEOUT = int(os.environ.get("FP_METHOD_TIMEOUT", "120"))
+
+
+class _MethodTimeout(Exception):
+    pass
+
+
+def _on_alarm(signum, frame):
+    raise _MethodTimeout()
+
+
+def run_with_timeout(label, **kwargs):
+    """Run feasibility_pump(model, **kwargs) under a per-call wall-clock budget.
+    On timeout, returns an FPResult(reason="timeout") instead of raising, so the
+    rest of the comparison (and the other methods) still complete."""
+    t0 = time.perf_counter()
+    if hasattr(signal, "SIGALRM"):
+        old_handler = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(PER_METHOD_TIMEOUT)
+    try:
+        res = feasibility_pump(model, **kwargs)
+    except _MethodTimeout:
+        elapsed = time.perf_counter() - t0
+        print(f"  !! {label} exceeded {PER_METHOD_TIMEOUT}s, marked as timeout")
+        res = FPResult(False, None, -1, "timeout")
+    finally:
+        if hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    elapsed = time.perf_counter() - t0
+    return res, elapsed
 
 # 1. Load the instance file directly using Gurobi
 # (gurobipy.read handles both .mps and .lp formats seamlessly)
@@ -10,10 +50,10 @@ import gurobipy as gp
 # When an instance_path is given (e.g. by run_all_benchmarks.py --perturb), results are
 # also appended to the Excel log; with no args it just prints, as before.
 instance_path = sys.argv[1] if len(sys.argv) > 1 else \
-    "/Users/isaac/Desktop/research_cutting_plane/experiments/miplib_benchmark/neos-827175.mps.gz" # Change this path to test other instances
+    "/Users/isaac/Desktop/research_cutting_plane/experiments/binary_instances/2club200v15p5scn.mps.gz" 
 model = gp.read(instance_path)
 
-# 2. All three variants share the exact same perturbation settings, so the
+# 2. All four variants share the exact same perturbation settings, so the
 #    only difference between runs is which cuts are added each iteration.
 COMMON = dict(
     max_iter=500,
@@ -22,11 +62,10 @@ COMMON = dict(
     random_seed=42,
     verbose=False,   # set True to print per-iteration z vectors (very long on big instances)
 )
+FACE_K = 4   # face_k for the Structural+FaceProbe+Perturb run (use_face_probe)
 
 print("--- Plain FP + Perturbation ---")
-t0 = time.perf_counter()
-res_plain = feasibility_pump(model, **COMMON)
-time_plain = time.perf_counter() - t0
+res_plain, time_plain = run_with_timeout("Plain+Perturb", **COMMON)
 
 if len(sys.argv) > 4 and sys.argv[4] == "plain_only":
     from results_logger import log_results
@@ -42,36 +81,49 @@ if len(sys.argv) > 4 and sys.argv[4] == "plain_only":
     sys.exit(0)
 
 print("\n--- No-Good Cuts + Perturbation ---")
-t0 = time.perf_counter()
-res_no_good = feasibility_pump(model, use_no_good_cuts=True, **COMMON)
-time_no_good = time.perf_counter() - t0
+res_no_good, time_no_good = run_with_timeout("No-Good+Perturb", use_no_good_cuts=True, **COMMON)
 
 print("\n--- Structural Cuts + Perturbation ---")
-t0 = time.perf_counter()
-res_cuts = feasibility_pump(
-    model,
+res_cuts, time_cuts = run_with_timeout(
+    "Structural+Perturb",
     use_structural_cuts=True,
     max_cuts_per_iter=30,
     cut_tol=1e-6,
     **COMMON,
 )
-time_cuts = time.perf_counter() - t0
+
+print("\n--- Structural Cuts + Face Probe + Perturbation ---")
+res_face, time_face = run_with_timeout(
+    "Structural+FaceProbe+Perturb",
+    use_structural_cuts=True,
+    use_face_probe=True,
+    face_k=FACE_K,
+    max_cuts_per_iter=30,
+    cut_tol=1e-6,
+    **COMMON,
+)
 
 def fmt_cuts(res):
     if not res.cuts_by_type:
-        return "none"
-    return ", ".join(f"{name.replace('Cut', '')}={n}" for name, n in sorted(res.cuts_by_type.items()))
+        s = "none"
+    else:
+        s = ", ".join(f"{name.replace('Cut', '')}={n}" for name, n in sorted(res.cuts_by_type.items()))
+    if getattr(res, "face_probe_cuts", 0):
+        s += f" [face_probe={res.face_probe_cuts}]"
+    return s
 
 
 # 3. Print out the final comparison summary
 print("\n=== Benchmark Summary (all with perturbation) ===")
-print(f"Plain+Perturb      | Iterations: {res_plain.iterations}, Reason: {res_plain.reason}, Perturbations: {res_plain.perturbations}")
-print(f"No-Good+Perturb    | Iterations: {res_no_good.iterations}, Reason: {res_no_good.reason}, Cuts Added: {res_no_good.cuts_added}, Perturbations: {res_no_good.perturbations}")
-print(f"Structural+Perturb | Iterations: {res_cuts.iterations}, Reason: {res_cuts.reason}, Cuts Added: {res_cuts.cuts_added}, Perturbations: {res_cuts.perturbations}")
+print(f"Plain+Perturb                | Iterations: {res_plain.iterations}, Reason: {res_plain.reason}, Perturbations: {res_plain.perturbations}")
+print(f"No-Good+Perturb              | Iterations: {res_no_good.iterations}, Reason: {res_no_good.reason}, Cuts Added: {res_no_good.cuts_added}, Perturbations: {res_no_good.perturbations}")
+print(f"Structural+Perturb           | Iterations: {res_cuts.iterations}, Reason: {res_cuts.reason}, Cuts Added: {res_cuts.cuts_added}, Perturbations: {res_cuts.perturbations}")
+print(f"Structural+FaceProbe+Perturb | Iterations: {res_face.iterations}, Reason: {res_face.reason}, Cuts Added: {res_face.cuts_added}, Perturbations: {res_face.perturbations}")
 
 print("\n=== Cuts added by type ===")
-print(f"No-Good    | {fmt_cuts(res_no_good)}")
-print(f"Structural | {fmt_cuts(res_cuts)}")
+print(f"No-Good              | {fmt_cuts(res_no_good)}")
+print(f"Structural           | {fmt_cuts(res_cuts)}")
+print(f"Structural+FaceProbe | {fmt_cuts(res_face)}")
 
 # 4. Append to the Excel log when driven with an explicit instance path
 if len(sys.argv) > 1:
@@ -97,4 +149,5 @@ if len(sys.argv) > 1:
         row("Plain+Perturb", res_plain, time_plain, False),
         row("No-Good+Perturb", res_no_good, time_no_good, True),
         row("Structural+Perturb", res_cuts, time_cuts, True),
+        row("Structural+FaceProbe+Perturb", res_face, time_face, True),
     ], sheet_name=sheet_name)

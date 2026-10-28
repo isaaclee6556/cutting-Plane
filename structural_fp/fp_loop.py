@@ -283,7 +283,9 @@ def feasibility_pump(
                            formula is valid for any face size, not just k=3).
     face_k                : number of fractional directions probed by use_face_probe
                            (2**face_k feasibility checks per iteration). Clamped to
-                           the number of integer variables.
+                           the number of integer variables AND to the number of
+                           directions actually fractional at x_hat this iteration
+                           (never padded with already-integral directions).
 
     Returns
     -------
@@ -383,7 +385,18 @@ def feasibility_pump(
             # square/star/... detection below can pick up emergent structure)
             # and add a single CubeCut for the whole face unconditionally.
             if use_face_probe:
-                k_eff = min(face_k, n_ivars)
+                # Clamp to the number of directions actually fractional at x_hat.
+                # Without this, an instance with fewer fractional vars than
+                # face_k gets padded with already-integral directions (tied at
+                # |x-0.5|=0.5, broken by index) — probing the *same* irrelevant
+                # pair of directions every iteration, which both wastes
+                # feasibility checks and floods idx with near-duplicate points
+                # (observed: 775 cuts in 25 iterations on a 100-var instance
+                # with only 2 fractional vars, vs. the intended handful).
+                n_fractional = sum(
+                    1 for name in sorted_ivars if abs(x_hat[name] - round(x_hat[name])) > 1e-6
+                )
+                k_eff = min(face_k, n_ivars, max(n_fractional, 1))
                 face_positions = sorted(
                     range(n_ivars), key=lambda i: abs(x_hat[sorted_ivars[i]] - 0.5)
                 )[:k_eff]
