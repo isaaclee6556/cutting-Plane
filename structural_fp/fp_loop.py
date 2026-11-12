@@ -399,6 +399,7 @@ def feasibility_pump(
             # if all are infeasible, insert them all (so the usual edge/
             # square/star/... detection below can pick up emergent structure)
             # and add a single CubeCut for the whole face unconditionally.
+            face_cut = None
             if use_face_probe:
                 # Clamp to the number of directions actually fractional at x_hat.
                 # Without this, an instance with fewer fractional vars than
@@ -462,6 +463,19 @@ def feasibility_pump(
             x_hat_idx = {i: x_hat[sorted_ivars[i]] for i in range(n_ivars)}
 
             all_cuts = cuts_from_index(idx)
+            if face_cut is not None:
+                # Feed the face-probe cut into the same dominance pass as the
+                # natively-detected shapes. Without this, StructureIndex's own
+                # edge/square/cube/star/tulip detection re-discovers the
+                # sub-faces of the probed face (e.g. at face_k=4, inserting
+                # all 16 corners also yields several native 3-dim sub-cubes),
+                # and dominance_prune never learns those are already implied
+                # by the one cut just added directly to the LP — it only
+                # compares cuts within `all_cuts`. Adding face_cut here lets
+                # the (now size-agnostic) Cube>Cube / Cube>Square / Cube>Star /
+                # Cube>Tulip rules prune those redundant weaker rows instead
+                # of piling them on top of the face cut every iteration.
+                all_cuts = all_cuts + [face_cut]
             selected = select_cuts(all_cuts, x_hat_idx, k=max_cuts_per_iter, tol=cut_tol)
 
             # Exact-duplicate guard: dominance_prune only sees candidates

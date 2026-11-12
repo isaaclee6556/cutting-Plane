@@ -56,9 +56,9 @@ model = gp.read(instance_path)
 # 2. All four variants share the exact same perturbation settings, so the
 #    only difference between runs is which cuts are added each iteration.
 COMMON = dict(
-    max_iter=500,
-    max_perturbations=10,
-    perturb_scale=0.5,
+    max_iter=5000,
+    max_perturbations=100,
+    perturb_scale=1.5,
     random_seed=42,
     verbose=False,   # set True to print per-iteration z vectors (very long on big instances)
 )

@@ -79,16 +79,18 @@ def _square_corners(sc: SquareCut) -> frozenset:
 
 
 def _cube_corners(cc: CubeCut) -> frozenset:
-    a, b_dir, c_dir = sorted(cc.free)
-    base = cc.z
-    return frozenset([
-        base,
-        base ^ bit(a), base ^ bit(b_dir), base ^ bit(c_dir),
-        base ^ bit(a) ^ bit(b_dir),
-        base ^ bit(a) ^ bit(c_dir),
-        base ^ bit(b_dir) ^ bit(c_dir),
-        base ^ bit(a) ^ bit(b_dir) ^ bit(c_dir),
-    ])
+    """
+    All 2**|free| corners of the face spanned by `free`, anchored at `z`.
+
+    Generalized over the number of free directions (not just 3) so a
+    face-probe CubeCut with |free| = k (any k, e.g. 4) can be dominance-
+    checked the same way as a native 3-dim cube from StructureIndex.
+    """
+    dirs = sorted(cc.free)
+    corners = [cc.z]
+    for d in dirs:
+        corners = corners + [c ^ bit(d) for c in corners]
+    return frozenset(corners)
 
 
 def _agrees_outside(p: int, q: int, dirs: frozenset, n: int) -> bool:
@@ -217,6 +219,24 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
                 continue
             if (tc.K | tc.L) <= cc.free and _agrees_outside(tc.z, cc.z, cc.free, cc.n):
                 dominated.add(id(tc))
+
+    # --- Cube > Cube (a bigger face dominates one of its own sub-faces) ---
+    # Same argument as Cube > Square, generalized: if free_B is a strict
+    # subset of free_A and B's anchor is one of A's own corners, then every
+    # corner of B is also a corner of A (B's face is a sub-face of A's), so
+    # A's inequality already forces exclusion of all of B's corners. This is
+    # what lets face_k=4 collapse the native 3-dim sub-cubes/squares/stars
+    # that StructureIndex re-detects inside the same probed 4-face once all
+    # 16 corners are confirmed infeasible, instead of adding them alongside
+    # the one face-spanning cut as separate (weaker, redundant) rows.
+    for cc_big in cube_cuts:
+        if len(cc_big.free) >= cc_big.n:
+            continue
+        for cc_small in cube_cuts:
+            if cc_small is cc_big or id(cc_small) in dominated:
+                continue
+            if cc_small.free < cc_big.free and _agrees_outside(cc_small.z, cc_big.z, cc_big.free, cc_big.n):
+                dominated.add(id(cc_small))
 
     # --- Star: keep only the max-leaf-set per center ---
     star_best: dict[int, StarCut] = {}
