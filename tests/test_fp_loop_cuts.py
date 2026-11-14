@@ -107,36 +107,12 @@ class TestCutsAdded:
 
 
 # ---------------------------------------------------------------------------
-# No-good fallback: guarantee a rejected point is excluded even when no
-# structural cut is violated at the current x_hat (e.g. many simultaneously
-# fractional variables push the plain vertex cut's L1 distance above 1).
+# No-good fallback: guarantee a rejected point is excluded even when
+# dominance pruning leaves it uncovered (see TestCoverGuarantee in
+# test_fp_loop_guards.py for the monkeypatch-based regression tests of this
+# invariant; with no violation filtering left in select_cuts, there is no
+# parameter left here to force that condition).
 # ---------------------------------------------------------------------------
-
-class TestNoGoodFallback:
-    def test_fallback_fires_when_no_structural_cut_is_violated(self):
-        # cut_tol so high that filter_by_violation never keeps a real
-        # candidate; the no-good fallback must still add exactly one cut.
-        res = feasibility_pump(
-            make_fractional_cycle_milp(),
-            max_iter=20,
-            use_structural_cuts=True,
-            cut_tol=1e6,
-        )
-        assert res.cuts_added >= 1
-
-    def test_fallback_still_excludes_the_exact_rejected_point(self):
-        # Every rejected point in history must never satisfy the fallback
-        # vertex cut it produced, i.e. the LP can never reproduce it: with
-        # max_cuts_per_iter=0 (no opportunistic structural cuts at all),
-        # cuts_added must equal the number of distinct rejected points.
-        res = feasibility_pump(
-            make_fractional_cycle_milp(),
-            max_iter=20,
-            use_structural_cuts=True,
-            max_cuts_per_iter=0,
-        )
-        assert res.cuts_added == len(res.history)
-
 
 # ---------------------------------------------------------------------------
 # Behavior change: cuts vs. plain FP on the cycle-prone instance
@@ -199,61 +175,6 @@ class TestCutValidity:
         res = feasibility_pump(make_covering_milp(n=6), use_structural_cuts=True)
         # history stores one entry per non-feasible, non-cycling iteration
         assert len(res.history) == len(set(res.history))  # no duplicates
-
-
-# ---------------------------------------------------------------------------
-# Parameters: max_cuts_per_iter, cut_tol
-# ---------------------------------------------------------------------------
-
-class TestCutParameters:
-    def test_max_cuts_per_iter_zero_still_feasible(self):
-        # max_cuts_per_iter=0 means select_cuts returns empty list every iter,
-        # but make_simple_binary_milp() is feasible on the very first rounding
-        # (no rejected point is ever processed), so cuts_added stays 0 here
-        # regardless of the no-good fallback (see TestNoGoodFallback below).
-        res = feasibility_pump(
-            make_simple_binary_milp(),
-            use_structural_cuts=True,
-            max_cuts_per_iter=0,
-        )
-        assert res.cuts_added == 0
-        assert res.feasible
-
-    def test_max_cuts_per_iter_zero_still_excludes_rejected_points(self):
-        # On an instance that actually rejects a rounded point, max_cuts_per_iter=0
-        # suppresses the efficacy-selected structural cuts, but the no-good
-        # fallback must still fire so the LP can never reproduce that exact point.
-        res = feasibility_pump(
-            make_fractional_cycle_milp(),
-            max_iter=20,
-            use_structural_cuts=True,
-            max_cuts_per_iter=0,
-        )
-        assert res.cuts_added >= 1
-
-    def test_max_cuts_per_iter_1_caps_cuts(self):
-        # With max 1 cut per iteration, total cuts ≤ iterations
-        res = feasibility_pump(
-            make_covering_milp(n=10),
-            max_iter=20,
-            use_structural_cuts=True,
-            max_cuts_per_iter=1,
-        )
-        assert res.cuts_added <= res.iterations
-
-    def test_large_cut_tol_suppresses_cuts(self):
-        # cut_tol=1.0: only add cuts violated by more than 1.0 → rarely triggered
-        res = feasibility_pump(
-            make_simple_binary_milp(),
-            use_structural_cuts=True,
-            cut_tol=1.0,
-        )
-        # cuts_added may be 0 or low; importantly, pump still terminates
-        assert res.iterations >= 1
-
-    def test_default_parameters_find_feasible(self):
-        res = feasibility_pump(make_simple_binary_milp(), use_structural_cuts=True)
-        assert res.feasible
 
 
 # ---------------------------------------------------------------------------

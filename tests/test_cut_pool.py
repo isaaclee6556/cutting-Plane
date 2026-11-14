@@ -2,26 +2,18 @@
 Unit tests for cut_pool.py (Milestone 3).
 
 Tests are organized around:
-  - efficacy()
-  - filter_by_violation()
-  - top_k_by_efficacy()
   - dominance_prune()
-  - select_cuts()  (end-to-end pipeline)
+  - select_cuts()  (end-to-end pipeline: dominance_prune, keep every survivor)
 
 All fractional points are synthetic; no Gurobi required.
 """
 
-import math
-import pytest
 from structural_fp import StructureIndex
 from structural_fp.cuts import (
     VertexCut, EdgeCut, SquareCut, StarCut, CubeCut, TulipCut,
     cuts_from_index,
 )
-from structural_fp.cut_pool import (
-    efficacy, filter_by_violation, top_k_by_efficacy,
-    dominance_prune, select_cuts,
-)
+from structural_fp.cut_pool import dominance_prune, select_cuts
 
 
 # ---------------------------------------------------------------------------
@@ -64,141 +56,6 @@ def full_cube_index(n=3) -> StructureIndex:
     for p in range(8):
         idx.insert(p)
     return idx
-
-
-# ---------------------------------------------------------------------------
-# efficacy()
-# ---------------------------------------------------------------------------
-
-class TestEfficacy:
-    def test_violated_cut(self):
-        # VertexCut(z=0, n=3): x0+x1+x2 >= 1
-        # x_hat=(0.2,0.3,0.1): LHS=0.6, violation=0.4, ||a||=sqrt(3)
-        cut = VertexCut(z=0, n=3)
-        x_hat = {0: 0.2, 1: 0.3, 2: 0.1}
-        expected = 0.4 / math.sqrt(3)
-        assert efficacy(cut, x_hat) == pytest.approx(expected, rel=1e-6)
-
-    def test_not_violated_returns_zero(self):
-        # VertexCut(z=0, n=3): x0+x1+x2 >= 1; x_hat with LHS=1.5 → not violated
-        cut = VertexCut(z=0, n=3)
-        x_hat = {0: 0.6, 1: 0.5, 2: 0.4}
-        assert efficacy(cut, x_hat) == pytest.approx(0.0)
-
-    def test_exactly_on_boundary_returns_zero(self):
-        # x0+x1+x2 = 1.0 exactly → not violated → efficacy 0
-        cut = VertexCut(z=0, n=3)
-        x_hat = {0: 0.5, 1: 0.3, 2: 0.2}
-        assert efficacy(cut, x_hat) == pytest.approx(0.0)
-
-    def test_deeper_violation_higher_efficacy(self):
-        # x_hat_deep is farther from the cut than x_hat_shallow
-        cut = VertexCut(z=0, n=3)
-        x_shallow = {0: 0.4, 1: 0.1, 2: 0.1}   # LHS=0.6 violation=0.4
-        x_deep    = {0: 0.1, 1: 0.1, 2: 0.1}   # LHS=0.3 violation=0.7
-        assert efficacy(cut, x_deep) > efficacy(cut, x_shallow)
-
-    def test_star_efficacy(self):
-        # StarCut(z=0, leaves={0,1,2}): x0+x1+x2 >= 2
-        # x_hat=(0.5,0.5,0.5): LHS=1.5, violation=0.5, ||a||=sqrt(3)
-        cut = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3)
-        x_hat = {0: 0.5, 1: 0.5, 2: 0.5}
-        expected = 0.5 / math.sqrt(3)
-        assert efficacy(cut, x_hat) == pytest.approx(expected, rel=1e-6)
-
-    def test_higher_norm_lowers_efficacy(self):
-        # PropellerCut has larger coefficients → lower efficacy for same violation
-        # Compare VertexCut and a cut with same violation but smaller norm
-        edge_cut = EdgeCut(z=4, axis=0, n=3)
-        # EdgeCut(4, 0, 3): coeffs={1:1, 2:-1}, rhs=0
-        # x_hat={0:0, 1:0.1, 2:0.5}: LHS=0.1-0.5=-0.4, violation=0.4, norm=sqrt(2)
-        x_hat = {0: 0.0, 1: 0.1, 2: 0.5}
-        expected = 0.4 / math.sqrt(2)
-        assert efficacy(edge_cut, x_hat) == pytest.approx(expected, rel=1e-6)
-
-
-# ---------------------------------------------------------------------------
-# filter_by_violation()
-# ---------------------------------------------------------------------------
-
-class TestFilterByViolation:
-    def test_all_violated(self):
-        idx = star_index()
-        cuts = cuts_from_index(idx)
-        # x_hat at the centroid of visited points: easily violated by most cuts
-        x_hat = {0: 0.1, 1: 0.1, 2: 0.1}
-        result = filter_by_violation(cuts, x_hat, tol=1e-6)
-        assert len(result) > 0
-
-    def test_none_violated(self):
-        # VertexCut(z=0, n=3): x0+x1+x2 >= 1
-        # x_hat=(0.5,0.4,0.3): LHS=1.2 ≥ 1 → NOT violated
-        cuts = [VertexCut(z=0, n=3)]
-        x_hat = {0: 0.5, 1: 0.4, 2: 0.3}
-        result = filter_by_violation(cuts, x_hat, tol=1e-6)
-        assert result == []
-
-    def test_tolerance_boundary(self):
-        # VertexCut(z=0, n=3): x0+x1+x2 >= 1; x_hat: LHS = 1 - 1e-7
-        cuts = [VertexCut(z=0, n=3)]
-        x_hat = {0: (1 - 1e-7) / 3, 1: (1 - 1e-7) / 3, 2: (1 - 1e-7) / 3}
-
-        # tol=1e-6: LHS ≈ 1-1e-7, so (rhs - LHS) ≈ 1e-7 < tol → NOT flagged as violated
-        result_strict = filter_by_violation(cuts, x_hat, tol=1e-6)
-        assert result_strict == []
-
-        # tol=1e-9: 1e-7 > tol → IS flagged
-        result_loose = filter_by_violation(cuts, x_hat, tol=1e-9)
-        assert len(result_loose) == 1
-
-    def test_mixed_violated_and_not(self):
-        # Build two cuts with different rhs
-        # StarCut(z=0, {0,1,2}): rhs=2 — violated by x_hat=(0.5,0.5,0.5) (LHS=1.5)
-        # VertexCut(z=7, n=3): -x0-x1-x2 >= -2 — NOT violated (LHS=-1.5 > -2)
-        cuts = [
-            StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3),
-            VertexCut(z=7, n=3),
-        ]
-        x_hat = {0: 0.5, 1: 0.5, 2: 0.5}
-        result = filter_by_violation(cuts, x_hat, tol=1e-6)
-        assert len(result) == 1
-        assert isinstance(result[0], StarCut)
-
-
-# ---------------------------------------------------------------------------
-# top_k_by_efficacy()
-# ---------------------------------------------------------------------------
-
-class TestTopKByEfficacy:
-    def setup_method(self):
-        # VertexCut(z=0): x0+x1+x2 >= 1; StarCut(z=0): x0+x1+x2 >= 2
-        # For x_hat=(0.2,0.2,0.2):
-        #   Vertex: violation=1-0.6=0.4, norm=sqrt(3) → efficacy=0.4/sqrt(3)
-        #   Star:   violation=2-0.6=1.4, norm=sqrt(3) → efficacy=1.4/sqrt(3)
-        self.vertex = VertexCut(z=0, n=3)
-        self.star   = StarCut(z=0, leaves=frozenset({0, 1, 2}), n=3)
-        self.x_hat  = {0: 0.2, 1: 0.2, 2: 0.2}
-
-    def test_ranking_order(self):
-        cuts = [self.vertex, self.star]
-        ranked = top_k_by_efficacy(cuts, self.x_hat, k=2)
-        # Star has larger violation → higher efficacy → comes first
-        assert isinstance(ranked[0], StarCut)
-        assert isinstance(ranked[1], VertexCut)
-
-    def test_k_limits_results(self):
-        cuts = [self.vertex, self.star]
-        ranked = top_k_by_efficacy(cuts, self.x_hat, k=1)
-        assert len(ranked) == 1
-        assert isinstance(ranked[0], StarCut)
-
-    def test_k_larger_than_pool(self):
-        cuts = [self.vertex, self.star]
-        ranked = top_k_by_efficacy(cuts, self.x_hat, k=100)
-        assert len(ranked) == 2
-
-    def test_empty_input(self):
-        assert top_k_by_efficacy([], {}, k=10) == []
 
 
 # ---------------------------------------------------------------------------
@@ -362,62 +219,36 @@ class TestDominancePruneTulip:
 
 
 # ---------------------------------------------------------------------------
-# select_cuts() — end-to-end pipeline
+# select_cuts() — end-to-end pipeline (dominance_prune, keep every survivor)
 # ---------------------------------------------------------------------------
 
 class TestSelectCuts:
     def test_basic_pipeline(self):
-        # Square index: after prune → 1 SquareCut(4, {0,1})
-        # SquareCut formula: -x2 >= 0  (x2 ≤ 0)
-        # x_hat with x2=0.7 → violated
+        # Square index: after prune → 1 SquareCut(4, {0,1}); no vertex/edge
+        # cuts survive since the square dominates all of them.
         idx = square_index()
         cuts = cuts_from_index(idx)
-        x_hat = {0: 0.5, 1: 0.5, 2: 0.7}
-        result = select_cuts(cuts, x_hat, k=10, tol=1e-6)
+        result = select_cuts(cuts)
         assert len(result) == 1
         assert isinstance(result[0], SquareCut)
 
-    def test_returns_empty_when_nothing_violated(self):
-        # SquareCut: -x2 >= 0 → not violated when x2=0
-        idx = square_index()
-        cuts = cuts_from_index(idx)
-        x_hat = {0: 0.5, 1: 0.5, 2: 0.0}
-        result = select_cuts(cuts, x_hat, k=10, tol=1e-6)
-        assert result == []
-
-    def test_k_cap_respected(self):
+    def test_matches_dominance_prune(self):
         idx = star_index()
         cuts = cuts_from_index(idx)
-        # x_hat that violates many cuts
-        x_hat = {0: 0.1, 1: 0.1, 2: 0.1}
-        result = select_cuts(cuts, x_hat, k=2, tol=1e-6)
-        assert len(result) <= 2
-
-    def test_result_ordered_by_efficacy(self):
-        # Use star index: StarCut(rhs=2) should have higher efficacy than VertexCut(rhs=1)
-        # at x_hat near zero (since both have same ||a|| but star has bigger violation)
-        idx = star_index()
-        cuts = cuts_from_index(idx)
-        x_hat = {0: 0.1, 1: 0.1, 2: 0.1}
-        result = select_cuts(cuts, x_hat, k=10, tol=1e-6, prune=False)
-        # Compute efficacies and verify they're non-increasing
-        effs = [efficacy(c, x_hat) for c in result]
-        assert effs == sorted(effs, reverse=True)
+        assert select_cuts(cuts) == dominance_prune(cuts)
 
     def test_prune_false_includes_dominated(self):
-        # Without pruning, vertex cuts should also be returned (if violated)
+        # Without pruning, vertex/edge cuts are also returned.
         idx = square_index()
         cuts = cuts_from_index(idx)
-        x_hat = {0: 0.5, 1: 0.5, 2: 0.7}
-        result_pruned   = select_cuts(cuts, x_hat, k=100, tol=1e-6, prune=True)
-        result_unpruned = select_cuts(cuts, x_hat, k=100, tol=1e-6, prune=False)
-        # Unpruned should have at least as many cuts
-        assert len(result_unpruned) >= len(result_pruned)
+        result_pruned   = select_cuts(cuts, prune=True)
+        result_unpruned = select_cuts(cuts, prune=False)
+        assert result_unpruned == cuts
+        assert len(result_unpruned) > len(result_pruned)
 
     def test_star_cuts_not_dominated_by_cube(self):
         # In the full cube, star cuts should survive dominance pruning
         idx = full_cube_index()
         cuts = cuts_from_index(idx)
-        x_hat = {0: 0.1, 1: 0.1, 2: 0.1}
-        result = select_cuts(cuts, x_hat, k=100, tol=1e-6)
+        result = select_cuts(cuts)
         assert any(isinstance(c, StarCut) for c in result)

@@ -4,10 +4,7 @@ from .cuts import (
     VertexCut, EdgeCut, SquareCut, StarCut, CubeCut, TulipCut, PropellerCut,
     SymbolicCut, CutRow, evaluate, is_violated, cuts_from_index,
 )
-from .cut_pool import (
-    efficacy, filter_by_violation, top_k_by_efficacy,
-    dominance_prune, select_cuts,
-)
+from .cut_pool import dominance_prune, select_cuts
 from .io import (
     load_mps, make_simple_binary_milp, make_covering_milp,
     make_infeasible_lp_milp, make_fractional_cycle_milp,
@@ -21,7 +18,6 @@ __all__ = [
     "VertexCut", "EdgeCut", "SquareCut", "StarCut", "CubeCut",
     "TulipCut", "PropellerCut", "SymbolicCut", "CutRow",
     "evaluate", "is_violated", "cuts_from_index",
-    "efficacy", "filter_by_violation", "top_k_by_efficacy",
     "dominance_prune", "select_cuts",
     "load_mps", "make_simple_binary_milp", "make_covering_milp",
     "make_infeasible_lp_milp", "make_fractional_cycle_milp",

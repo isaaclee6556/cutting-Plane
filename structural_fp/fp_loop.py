@@ -10,7 +10,8 @@ Algorithm (per iteration):
   4. Cycle detection: if z_dict already visited →
        - if perturbations < max_perturbations: perturb, clear visited, continue.
        - else: stop (reason="cycle").
-  5. (Optional) Insert z into StructureIndex; generate and add violated cuts.
+  5. (Optional) Insert z into StructureIndex; generate and add every
+     dominance-surviving cut (no violation filtering, no cap).
   6. Change objective to minimize L1 distance to z_dict (projection).
   7. Solve projection LP → new x_hat.  Repeat.
 
@@ -247,8 +248,6 @@ def feasibility_pump(
     verbose: bool = False,
     use_structural_cuts: bool = False,
     use_no_good_cuts: bool = False,
-    max_cuts_per_iter: int = 30,
-    cut_tol: float = 1e-6,
     max_perturbations: int = 0,
     perturb_scale: float = 0.3,
     random_seed: Optional[int] = None,
@@ -275,9 +274,6 @@ def feasibility_pump(
                            (classic no-good cut) for the visited point z each
                            iteration, instead of full structural cuts.
                            Mutually exclusive with use_structural_cuts.
-    max_cuts_per_iter    : max cuts added per iteration (efficacy-ranked;
-                           only applies to use_structural_cuts).
-    cut_tol              : minimum violation to consider a cut active.
     max_perturbations    : max cycle-breaking perturbations before giving up.
                            0 (default) means stop immediately on first cycle.
     perturb_scale        : noise magnitude added to projection coefficients.
@@ -459,9 +455,6 @@ def feasibility_pump(
 
             idx.insert(z_mask)
 
-            # x_hat in index space: bit i → sorted_ivars[i]
-            x_hat_idx = {i: x_hat[sorted_ivars[i]] for i in range(n_ivars)}
-
             all_cuts = cuts_from_index(idx)
             if face_cut is not None:
                 # Feed the face-probe cut into the same dominance pass as the
@@ -476,7 +469,7 @@ def feasibility_pump(
                 # Cube>Tulip rules prune those redundant weaker rows instead
                 # of piling them on top of the face cut every iteration.
                 all_cuts = all_cuts + [face_cut]
-            selected = select_cuts(all_cuts, x_hat_idx, k=max_cuts_per_iter, tol=cut_tol)
+            selected = select_cuts(all_cuts)
 
             # Exact-duplicate guard: dominance_prune only sees candidates
             # from idx, so it can't know about rows added outside this call

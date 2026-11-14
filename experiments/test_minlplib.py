@@ -56,8 +56,6 @@ res_perturb = feasibility_pump(
     use_structural_cuts=True,
     max_perturbations=20,
     perturb_scale=0.3,
-    max_cuts_per_iter=30,
-    cut_tol=1e-6,
     random_seed=42,
     verbose=(len(sys.argv) <= 1),  # quiet when driven by the batch runner
 )

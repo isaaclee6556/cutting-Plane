@@ -87,8 +87,6 @@ print("\n--- Structural Cuts + Perturbation ---")
 res_cuts, time_cuts = run_with_timeout(
     "Structural+Perturb",
     use_structural_cuts=True,
-    max_cuts_per_iter=30,
-    cut_tol=1e-6,
     **COMMON,
 )
 
@@ -98,8 +96,6 @@ res_face, time_face = run_with_timeout(
     use_structural_cuts=True,
     use_face_probe=True,
     face_k=FACE_K,
-    max_cuts_per_iter=30,
-    cut_tol=1e-6,
     **COMMON,
 )
 

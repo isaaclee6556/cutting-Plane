@@ -64,7 +64,7 @@ class TestCoverGuarantee:
     def test_fallback_fires_when_selected_cut_misses_z(self, monkeypatch):
         # Replace select_cuts with one that returns only a VertexCut of a
         # different point, which does not exclude the rejected z = 0.
-        def misses_z(cuts, x_hat, k, tol=1e-6, prune=True):
+        def misses_z(cuts, prune=True):
             n = cuts[0].n
             return [VertexCut(z=0b11, n=n)]
 
@@ -76,7 +76,7 @@ class TestCoverGuarantee:
         assert res.fallback_cuts >= 1
 
     def test_no_fallback_when_selected_cut_already_covers_z(self, monkeypatch):
-        def covers_z(cuts, x_hat, k, tol=1e-6, prune=True):
+        def covers_z(cuts, prune=True):
             return [c for c in cuts if isinstance(c, VertexCut) and c.z == 0]
 
         monkeypatch.setattr(fp_loop, "select_cuts", covers_z)

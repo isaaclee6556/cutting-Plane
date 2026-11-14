@@ -1,71 +1,20 @@
 r"""
-Cut pool: violation filtering, efficacy ranking, and dominance pruning.
+Cut pool: dominance pruning.
 
-Given symbolic cuts from cuts_from_index() and a fractional LP solution x_hat,
-this module selects the most useful cuts to add to the LP.
-
-Pipeline (select_cuts):
-  1. dominance_prune  — remove cuts made redundant by stronger ones
-  2. filter_by_violation — keep only cuts violated at x_hat
-  3. top_k_by_efficacy — rank by normalized violation, return top k
+Given symbolic cuts from cuts_from_index(), this module removes cuts made
+redundant by stronger ones; every surviving cut is added to the LP.
 
 Reference: spec Section 5.
 """
 
 from __future__ import annotations
-import math
 
 from .bitops import bit, bits
 from .cuts import (
     CutRow, SymbolicCut,
     VertexCut, EdgeCut, SquareCut, StarCut,
     CubeCut, TulipCut, PropellerCut,
-    is_violated,
 )
-
-
-# ---------------------------------------------------------------------------
-# Efficacy
-# ---------------------------------------------------------------------------
-
-def efficacy(cut: SymbolicCut, x_hat: dict[int, float]) -> float:
-    """
-    efficacy = (rhs - a^T x_hat) / ||a||_2
-
-    Measures how deeply x_hat violates the cut, normalized by cut length.
-    Higher = more violated = higher priority to add.
-    Returns 0.0 when the cut is not violated or the coefficient vector is zero.
-    """
-    coeffs, rhs = cut.to_inequality()
-    lhs = sum(c * x_hat.get(i, 0.0) for i, c in coeffs.items())
-    violation = rhs - lhs
-    if violation <= 0.0:
-        return 0.0
-    norm = math.sqrt(sum(c * c for c in coeffs.values()))
-    return violation / norm if norm > 1e-12 else 0.0
-
-
-# ---------------------------------------------------------------------------
-# Filtering and ranking
-# ---------------------------------------------------------------------------
-
-def filter_by_violation(
-    cuts: list[SymbolicCut],
-    x_hat: dict[int, float],
-    tol: float = 1e-6,
-) -> list[SymbolicCut]:
-    """Return only cuts for which a^T x_hat < rhs - tol."""
-    return [c for c in cuts if is_violated(*c.to_inequality(), x_hat, tol=tol)]
-
-
-def top_k_by_efficacy(
-    cuts: list[SymbolicCut],
-    x_hat: dict[int, float],
-    k: int,
-) -> list[SymbolicCut]:
-    """Return up to k cuts ordered by efficacy (highest first)."""
-    ranked = sorted(cuts, key=lambda c: efficacy(c, x_hat), reverse=True)
-    return ranked[:k]
 
 
 # ---------------------------------------------------------------------------
@@ -279,26 +228,18 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
 
 def select_cuts(
     cuts: list[SymbolicCut],
-    x_hat: dict[int, float],
-    k: int = 30,
-    tol: float = 1e-6,
     prune: bool = True,
 ) -> list[SymbolicCut]:
     """
-    Full cut-selection pipeline.
+    Full cut-selection pipeline: dominance-prune, then keep every survivor.
 
     Parameters
     ----------
     cuts  : all symbolic cuts from cuts_from_index()
-    x_hat : current fractional LP solution  {var_index: float}
-    k     : max cuts to return (spec recommends 10–50)
-    tol   : violation tolerance (spec recommends 1e-6)
-    prune : apply dominance pruning before filtering (default True)
+    prune : apply dominance pruning (default True)
 
     Returns
     -------
-    Up to k cuts that are violated at x_hat, ranked by efficacy.
+    Every cut not made redundant by a stronger one in the same pool.
     """
-    pool = dominance_prune(cuts) if prune else cuts
-    violated = filter_by_violation(pool, x_hat, tol=tol)
-    return top_k_by_efficacy(violated, x_hat, k=k)
+    return dominance_prune(cuts) if prune else list(cuts)
