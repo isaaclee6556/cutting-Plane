@@ -18,9 +18,15 @@ from structural_fp.io import (
 
 
 class TestValidation:
-    def test_requires_structural_cuts(self):
-        with pytest.raises(ValueError, match="use_face_probe requires use_structural_cuts"):
-            feasibility_pump(make_fractional_cycle_milp(), use_face_probe=True)
+    def test_face_probe_no_longer_requires_structural_cuts(self):
+        # M12: probing is independent of cut_mode -- this used to raise
+        # ValueError, now runs standalone under cut_mode="none" (no cuts at
+        # all, probing only decides which point is returned).
+        res = feasibility_pump(make_fractional_cycle_milp(), use_face_probe=True, face_k=4, max_iter=20)
+        assert isinstance(res, FPResult)
+        assert res.cuts_added == 0
+        assert res.face_probe_cuts == 0
+        assert res.probe_vertex_cuts == 0
 
     def test_default_off_matches_plain_structural(self):
         # use_face_probe defaults to False: identical to calling without it.
@@ -134,3 +140,53 @@ class TestFaceProbeNoEcho:
         )
         assert res.face_probe_cuts >= 1
         assert res.cuts_by_type.get("CubeCut", 0) == res.face_probe_cuts
+
+
+class TestCutModeProbeMatrix:
+    """
+    M12: probing is independent of cut_mode. Covers the 3 (cut_mode) x
+    (probe_k in {0,2,3,4}) combinations that the method registry (M13)
+    actually dispatches to.
+    """
+
+    @pytest.mark.parametrize("probe_k", [2, 3, 4])
+    @pytest.mark.parametrize("cut_kwargs", [
+        dict(),                                   # cut_mode="none"
+        dict(use_no_good_cuts=True),              # cut_mode="nogood"
+        dict(use_structural_cuts=True),           # cut_mode="structural"
+    ])
+    def test_runs_and_keeps_cover_invariant(self, probe_k, cut_kwargs):
+        debug_kwargs = dict(debug_check_cover=True) if "use_structural_cuts" in cut_kwargs else dict()
+        res = feasibility_pump(
+            make_random_covering_milp(n=16, m=10, seed=3),
+            use_face_probe=True, face_k=probe_k,
+            max_perturbations=10, perturb_scale=0.4, random_seed=1, max_iter=200,
+            **cut_kwargs, **debug_kwargs,
+        )
+        assert isinstance(res, FPResult)
+
+    def test_nogood_probe_only_adds_vertex_cuts(self):
+        res = feasibility_pump(
+            make_random_covering_milp(n=20, m=14, seed=2),
+            use_no_good_cuts=True, use_face_probe=True, face_k=4,
+            max_perturbations=10, perturb_scale=0.4, random_seed=1, max_iter=200,
+        )
+        assert set(res.cuts_by_type.keys()) <= {"VertexCut"}
+        assert res.face_probe_cuts == 0
+
+    def test_nogood_probe_counts_probe_vertex_cuts_separately(self):
+        res = feasibility_pump(
+            make_fractional_cycle_milp(),
+            use_no_good_cuts=True, use_face_probe=True, face_k=4,
+            max_perturbations=5, max_iter=20,
+        )
+        assert res.probe_vertex_cuts >= 1
+        assert res.probe_vertex_cuts <= res.cuts_by_type.get("VertexCut", 0)
+
+    def test_probe_k_zero_matches_no_probe_at_all(self):
+        for cut_kwargs in (dict(), dict(use_no_good_cuts=True), dict(use_structural_cuts=True)):
+            kwargs = dict(max_iter=50, random_seed=0, **cut_kwargs)
+            a = feasibility_pump(make_random_covering_milp(n=16, m=8, seed=2), use_face_probe=False, **kwargs)
+            b = feasibility_pump(make_random_covering_milp(n=16, m=8, seed=2), use_face_probe=True, face_k=0, **kwargs)
+            assert (a.iterations, a.reason, a.cuts_added, a.cuts_by_type) == \
+                   (b.iterations, b.reason, b.cuts_added, b.cuts_by_type)

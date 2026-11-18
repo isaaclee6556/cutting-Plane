@@ -370,8 +370,13 @@ class FPResult:
                     {"VertexCut": 5, "EdgeCut": 2}. Sums to cuts_added.
     fallback_cuts : VertexCuts added only to guarantee the visited point is
                     excluded (structural mode); already included in cuts_added.
-    face_probe_cuts : CubeCuts added by the face-probe step (use_face_probe);
-                    already included in cuts_added and in cuts_by_type["CubeCut"].
+    face_probe_cuts : CubeCuts added by the face-probe step under cut_mode=
+                    "structural" (use_structural_cuts); already included in
+                    cuts_added and in cuts_by_type["CubeCut"].
+    probe_vertex_cuts : VertexCuts added for probed *corners* (not the
+                    rounded point z itself) under cut_mode="nogood"
+                    (use_no_good_cuts); already included in cuts_added and
+                    in cuts_by_type["VertexCut"]. 0 under any other cut_mode.
 
     Optimality-mode fields (M11; all None/0/empty in mode="feasibility"):
     mode              : "feasibility" | "optimality".
@@ -403,6 +408,7 @@ class FPResult:
     cuts_by_type: dict[str, int] = field(default_factory=dict)
     fallback_cuts: int = 0
     face_probe_cuts: int = 0
+    probe_vertex_cuts: int = 0
     mode: str = "feasibility"
     best_obj: Optional[float] = None
     best_solution: Optional[dict[str, float]] = None
@@ -464,18 +470,26 @@ def feasibility_pump(
     random_seed          : seed for the perturbation RNG (None = non-deterministic).
     debug_check_cover    : (tests/debugging) after each structural insertion, assert
                            every visited point is excluded by some added row.
-    use_face_probe       : additional per-iteration step (requires use_structural_cuts).
-                           Instead of relying on structure to emerge opportunistically
-                           over many iterations, pick the face_k most-fractional
-                           variables at x_hat, fix every other int var at its rounded
-                           value z, and check feasibility of all 2^face_k corners of
-                           that face directly. mode="feasibility": any feasible corner
-                           is returned as the solution immediately. mode="optimality":
-                           every corner is evaluated (not just checked for feasibility)
-                           and may update the incumbent; all corners are then always
-                           inserted into the StructureIndex and the whole face is
-                           always cut (see cuts.CubeCut — the formula is valid for any
-                           face size, not just k=3).
+    use_face_probe       : additional per-iteration step, independent of which (if
+                           any) cut mechanism is active (M12: no longer requires
+                           use_structural_cuts). Instead of relying on structure to
+                           emerge opportunistically over many iterations, pick the
+                           face_k most-fractional variables at x_hat, fix every
+                           other int var at its rounded value z, and check
+                           feasibility of all 2^face_k corners of that face
+                           directly. mode="feasibility": any feasible corner is
+                           returned as the solution immediately. mode="optimality":
+                           every corner is evaluated (not just checked for
+                           feasibility) and may update the incumbent. What happens
+                           to the probed corners afterward depends on which cut
+                           mechanism is active: use_structural_cuts -- all corners
+                           are inserted into the StructureIndex and the whole face
+                           is always cut (see cuts.CubeCut — the formula is valid
+                           for any face size, not just k=3); use_no_good_cuts --
+                           each probed corner (other than z itself) gets its own
+                           VertexCut; neither -- probing only affects which point
+                           is returned/which incumbent is tracked, with no cuts at
+                           all (isolates probing's own effect).
     face_k                : number of fractional directions probed by use_face_probe
                            (2**face_k feasibility checks per iteration). Clamped to
                            the number of integer variables AND to the number of
@@ -512,12 +526,20 @@ def feasibility_pump(
         raise ValueError(
             "use_structural_cuts and use_no_good_cuts are mutually exclusive"
         )
-    if use_face_probe and not use_structural_cuts:
-        raise ValueError("use_face_probe requires use_structural_cuts=True")
+    # Internal normalization (M12): cut_mode and probe_k drive the rest of
+    # this function; use_face_probe no longer requires use_structural_cuts
+    # -- the face-probe step is independent of which (if any) cut mechanism
+    # is active, and reacts to the probed corners according to cut_mode.
+    cut_mode = "structural" if use_structural_cuts else ("nogood" if use_no_good_cuts else "none")
+    probe_k = face_k if use_face_probe else 0
 
     if int_vars is None:
         int_vars = _integer_var_names(model)
-    if use_structural_cuts or use_no_good_cuts:
+    if use_structural_cuts or use_no_good_cuts or use_face_probe:
+        # Face probing builds each corner via bit-flips on int_vars, which
+        # only makes sense for 0/1 variables -- same requirement as the cut
+        # mechanisms, now also needed when probing runs under cut_mode="none"
+        # (no longer gated behind use_structural_cuts).
         _require_binary(model, int_vars)
     sorted_ivars = sorted(int_vars)
     n_ivars = len(sorted_ivars)
@@ -541,7 +563,7 @@ def feasibility_pump(
     checker = _FeasChecker(model, int_vars)
 
     # Structure index (only used when use_structural_cuts=True)
-    idx = StructureIndex(n_ivars) if use_structural_cuts else None
+    idx = StructureIndex(n_ivars) if cut_mode == "structural" else None
 
     # --- Optimality-mode bookkeeping (M11). Harmless no-ops in feasibility
     # mode: initialized unconditionally (cheap) so _finish() below can
@@ -597,6 +619,7 @@ def feasibility_pump(
         return FPResult(
             U is not None, sol_int, iterations, reason, history,
             total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+            probe_vertex_cuts=probe_vertex_cuts,
             mode=mode, best_obj=U, best_solution=best_solution, bound=bound, gap=gap,
             proved_optimal=reason in ("optimal", "infeasible"),
             n_feasible_found=n_feasible_found, n_incumbent_updates=n_incumbent_updates,
@@ -610,6 +633,7 @@ def feasibility_pump(
     cuts_by_type: dict[str, int] = {}
     fallback_cuts = 0
     face_probe_cuts = 0
+    probe_vertex_cuts = 0
     n_perturbations = 0
 
     _apply_time_limit(relax, time_limit, _elapsed())
@@ -641,7 +665,7 @@ def feasibility_pump(
                 return _finish("time_limit", k)
             return FPResult(False, None, k, "time_limit", history,
                             total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
-                            time_sec=elapsed)
+                            probe_vertex_cuts=probe_vertex_cuts, time_sec=elapsed)
 
         x_hat = {v.VarName: v.X for v in relax.getVars()}
 
@@ -662,7 +686,8 @@ def feasibility_pump(
                 if verbose:
                     print(f"[FP] feasible at iter {k}")
                 return FPResult(True, z_dict, k + 1, "feasible", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                                probe_vertex_cuts=probe_vertex_cuts)
         else:
             status, obj, sol = checker.evaluate(z_dict)
             if status == "unbounded":
@@ -682,7 +707,8 @@ def feasibility_pump(
                 if mode == "optimality":
                     return _finish("cycle", k + 1)
                 return FPResult(False, None, k + 1, "cycle", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                                probe_vertex_cuts=probe_vertex_cuts)
             # Perturb: add noise to projection objective and reset visit set
             n_perturbations += 1
             visited.clear()
@@ -697,98 +723,100 @@ def feasibility_pump(
                     return _finish("time_limit", k + 1)
                 return FPResult(False, None, k + 1, "time_limit", history,
                                 total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
-                                time_sec=_elapsed())
+                                probe_vertex_cuts=probe_vertex_cuts, time_sec=_elapsed())
             if kind != "optimal":
                 if mode == "optimality":
                     if U is not None:
                         bound = U  # region now empty -> U is exactly optimal, gap=0
                     return _finish("optimal" if U is not None else "infeasible", k + 1)
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                                probe_vertex_cuts=probe_vertex_cuts)
             continue  # skip normal projection; go to next iteration
 
         visited.add(z_key)
         history.append(z_key)
 
-        # Step 5 — structural cuts (Milestone 5)
-        if use_structural_cuts and idx is not None:
-            z_mask = _to_bitmask(z_dict, sorted_ivars)
+        # Step 5 — face probe (cut_mode-independent, M12) + cut generation
+        # (cut_mode-dependent: "structural" | "nogood" | "none").
+        z_mask = _to_bitmask(z_dict, sorted_ivars)
 
-            # Face probe (optional): check all 2^face_k corners of the face
-            # spanned by the face_k most-fractional directions, fixing every
-            # other int var at z.
-            face_cut = None
-            if use_face_probe:
-                # Clamp to the number of directions actually fractional at x_hat.
-                # Without this, an instance with fewer fractional vars than
-                # face_k gets padded with already-integral directions (tied at
-                # |x-0.5|=0.5, broken by index) — probing the *same* irrelevant
-                # pair of directions every iteration, which both wastes
-                # feasibility checks and floods idx with near-duplicate points
-                # (observed: 775 cuts in 25 iterations on a 100-var instance
-                # with only 2 fractional vars, vs. the intended handful).
-                n_fractional = sum(
-                    1 for name in sorted_ivars if abs(x_hat[name] - round(x_hat[name])) > 1e-6
-                )
-                k_eff = min(face_k, n_ivars, max(n_fractional, 1))
-                face_positions = sorted(
-                    range(n_ivars), key=lambda i: abs(x_hat[sorted_ivars[i]] - 0.5)
-                )[:k_eff]
-                corner_masks = []
+        if probe_k > 0:
+            # Clamp to the number of directions actually fractional at x_hat.
+            # Without this, an instance with fewer fractional vars than
+            # probe_k gets padded with already-integral directions (tied at
+            # |x-0.5|=0.5, broken by index) — probing the *same* irrelevant
+            # pair of directions every iteration, which both wastes
+            # feasibility checks and floods idx with near-duplicate points
+            # (observed: 775 cuts in 25 iterations on a 100-var instance
+            # with only 2 fractional vars, vs. the intended handful).
+            n_fractional = sum(
+                1 for name in sorted_ivars if abs(x_hat[name] - round(x_hat[name])) > 1e-6
+            )
+            k_eff = min(probe_k, n_ivars, max(n_fractional, 1))
+            face_positions = sorted(
+                range(n_ivars), key=lambda i: abs(x_hat[sorted_ivars[i]] - 0.5)
+            )[:k_eff]
+            corner_masks = []
 
-                if mode == "feasibility":
-                    feasible_corner = None
-                    for combo in range(1 << k_eff):
-                        corner_mask = z_mask
-                        for j, pos in enumerate(face_positions):
-                            if (combo >> j) & 1:
-                                corner_mask |= (1 << pos)
-                            else:
-                                corner_mask &= ~(1 << pos)
-                        corner_masks.append(corner_mask)
-                        if corner_mask == z_mask:
-                            continue  # already confirmed infeasible this iteration
-                        corner_dict = {
-                            name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
-                        }
-                        if checker.is_feasible(corner_dict):
-                            feasible_corner = corner_dict
-                            break
+            if mode == "feasibility":
+                feasible_corner = None
+                for combo in range(1 << k_eff):
+                    corner_mask = z_mask
+                    for j, pos in enumerate(face_positions):
+                        if (combo >> j) & 1:
+                            corner_mask |= (1 << pos)
+                        else:
+                            corner_mask &= ~(1 << pos)
+                    corner_masks.append(corner_mask)
+                    if corner_mask == z_mask:
+                        continue  # already confirmed infeasible this iteration
+                    corner_dict = {
+                        name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
+                    }
+                    if checker.is_feasible(corner_dict):
+                        feasible_corner = corner_dict
+                        break
 
-                    if feasible_corner is not None:
+                if feasible_corner is not None:
+                    if verbose:
+                        print(f"[FP] face probe found feasible corner at iter {k}")
+                    return FPResult(True, feasible_corner, k + 1, "feasible", history,
+                                    total_cuts, n_perturbations, dict(cuts_by_type),
+                                    fallback_cuts, face_probe_cuts,
+                                    probe_vertex_cuts=probe_vertex_cuts)
+            else:
+                # Optimality mode: never stop early -- evaluate every
+                # corner (skipping z_mask itself, already evaluated in
+                # Step 3 above), update the incumbent as needed, and
+                # unconditionally cut the whole face below (every corner
+                # ends up excluded either way: infeasible, or feasible
+                # but not an improvement).
+                for combo in range(1 << k_eff):
+                    corner_mask = z_mask
+                    for j, pos in enumerate(face_positions):
+                        if (combo >> j) & 1:
+                            corner_mask |= (1 << pos)
+                        else:
+                            corner_mask &= ~(1 << pos)
+                    corner_masks.append(corner_mask)
+                    if corner_mask == z_mask:
+                        continue
+                    corner_dict = {
+                        name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
+                    }
+                    status, obj, sol = checker.evaluate(corner_dict)
+                    if status == "unbounded":
                         if verbose:
-                            print(f"[FP] face probe found feasible corner at iter {k}")
-                        return FPResult(True, feasible_corner, k + 1, "feasible", history,
-                                        total_cuts, n_perturbations, dict(cuts_by_type),
-                                        fallback_cuts, face_probe_cuts)
-                else:
-                    # Optimality mode: never stop early -- evaluate every
-                    # corner (skipping z_mask itself, already evaluated in
-                    # Step 3 above), update the incumbent as needed, and
-                    # unconditionally cut the whole face below (every corner
-                    # ends up excluded either way: infeasible, or feasible
-                    # but not an improvement).
-                    for combo in range(1 << k_eff):
-                        corner_mask = z_mask
-                        for j, pos in enumerate(face_positions):
-                            if (combo >> j) & 1:
-                                corner_mask |= (1 << pos)
-                            else:
-                                corner_mask &= ~(1 << pos)
-                        corner_masks.append(corner_mask)
-                        if corner_mask == z_mask:
-                            continue
-                        corner_dict = {
-                            name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
-                        }
-                        status, obj, sol = checker.evaluate(corner_dict)
-                        if status == "unbounded":
-                            if verbose:
-                                print(f"[FP] unbounded (face-probe corner) at iter {k}")
-                            return _finish("unbounded", k + 1)
-                        if status == "feasible":
-                            _record_feasible(k, obj, sol)
+                            print(f"[FP] unbounded (face-probe corner) at iter {k}")
+                        return _finish("unbounded", k + 1)
+                    if status == "feasible":
+                        _record_feasible(k, obj, sol)
 
+            # React to the probed corners according to cut_mode. Corner
+            # generation/evaluation above is identical regardless of
+            # cut_mode; only what we do with the result differs.
+            if cut_mode == "structural":
                 for cm in corner_masks:
                     idx.insert(cm)
                 face_free = frozenset(face_positions)
@@ -807,7 +835,32 @@ def feasibility_pump(
                 if verbose:
                     print(f"[FP]   face probe: added CubeCut over {sorted(face_positions)} "
                           f"(total {total_cuts})")
+            elif cut_mode == "nogood":
+                # One VertexCut per probed corner (z's own VertexCut is
+                # added below, as always -- skip it here to avoid a
+                # duplicate). Row-deduped per spec, unlike z's own cut
+                # below (which the pre-M12 no-good branch never deduped).
+                n_probe_added = 0
+                for cm in corner_masks:
+                    if cm == z_mask:
+                        continue
+                    coeffs, rhs = VertexCut(z=cm, n=n_ivars).to_inequality()
+                    key = _row_key(coeffs, rhs)
+                    if key in added_row_keys:
+                        continue
+                    added_row_keys.add(key)
+                    added_rows.append(_add_row_to_relax(relax, coeffs, rhs, sorted_ivars))
+                    total_cuts += 1
+                    probe_vertex_cuts += 1
+                    n_probe_added += 1
+                    cuts_by_type["VertexCut"] = cuts_by_type.get("VertexCut", 0) + 1
+                if verbose and n_probe_added:
+                    print(f"[FP]   face probe (nogood): added {n_probe_added} corner "
+                          f"VertexCuts (total {total_cuts})")
+            # cut_mode == "none": probing only moves the incumbent (already
+            # done above); no cuts of any kind.
 
+        if cut_mode == "structural":
             idx.insert(z_mask)
 
             all_cuts = cuts_from_index(idx)
@@ -884,8 +937,7 @@ def feasibility_pump(
                         f"point(s) not excluded by any added row, e.g. masks {uncovered[:5]}"
                     )
 
-        elif use_no_good_cuts:
-            z_mask = _to_bitmask(z_dict, sorted_ivars)
+        elif cut_mode == "nogood":
             cut = VertexCut(z=z_mask, n=n_ivars)
             _add_cut_to_relax(relax, cut, sorted_ivars)
             total_cuts += 1
@@ -931,11 +983,13 @@ def feasibility_pump(
             relax.optimize()
             if relax.Status != GRB.OPTIMAL:
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
-                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                                probe_vertex_cuts=probe_vertex_cuts)
 
     if verbose:
         print(f"[FP] max_iter={max_iter} reached without feasible solution")
     if mode == "optimality":
         return _finish("max_iter", max_iter)
     return FPResult(False, None, max_iter, "max_iter", history,
-                    total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+                    total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                    probe_vertex_cuts=probe_vertex_cuts)
