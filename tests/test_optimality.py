@@ -211,3 +211,52 @@ class TestTimeLimitPreservesIncumbent:
         if res.n_feasible_found > 0:
             assert res.best_obj is not None
             assert res.best_solution is not None
+
+
+# ---------------------------------------------------------------------------
+# M13.1: unbounded relaxation is not infeasibility; n_feasible_found doesn't
+# double-count a z re-evaluated before a perturbation's visited.clear()
+# ---------------------------------------------------------------------------
+
+class TestUnboundedRelaxation:
+    def test_unbounded_initial_relaxation_is_not_proved_infeasible(self):
+        # min -y, y continuous >= 0, no upper bound, no constraint linking
+        # it to x: the relaxation itself is unbounded before any cuts even
+        # exist, which must not be reported/treated as a proof of
+        # infeasibility (a real, distinct outcome).
+        model = gp.Model()
+        model.setParam("OutputFlag", 0)
+        x = model.addVar(vtype=GRB.BINARY, name="x")
+        y = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name="y")
+        model.setObjective(-y, GRB.MINIMIZE)
+        model.update()
+
+        res = feasibility_pump(model, mode="optimality", max_iter=10)
+        assert res.reason == "unbounded_relaxation"
+        assert not res.proved_optimal
+        assert not res.feasible
+
+
+class TestFeasibleFoundNotDoubleCounted:
+    def test_repeated_same_point_across_perturbations_not_double_counted(self):
+        # Known repro (see M13.1 discussion): plain mode (no cuts) on this
+        # weighted covering instance settles into oscillating between 3
+        # distinct points across perturbation epochs, one of them feasible
+        # and revisited on consecutive iterations before each perturbation
+        # resets `visited`. Confirmed via git-stash comparison that the
+        # pre-fix code counted it twice per epoch (196) vs. once (98) after
+        # guarding on `z_key not in visited` -- regression-pin that count,
+        # not just "some" count, so a future change that reintroduces the
+        # double-count would actually fail this test.
+        model = make_random_covering_milp(14, 9, seed=2)
+        xs = {v.VarName: v for v in model.getVars()}
+        model.setObjective(sum((i + 1) * xs[f"x{i}"] for i in range(14)), GRB.MINIMIZE)
+        model.update()
+
+        res = feasibility_pump(
+            model, mode="optimality", max_iter=5000,
+            max_perturbations=100, perturb_scale=0.5, random_seed=0,
+        )
+        assert res.reason == "cycle"
+        assert res.n_feasible_found == 98
+        assert res.n_feasible_found < res.iterations

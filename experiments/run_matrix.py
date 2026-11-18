@@ -1,12 +1,21 @@
 """
-Batch runner for the method matrix (M13): every (instance, method, seed)
-combination is one run, launched as its own subprocess via
+Batch runner for the method matrix (M13/M13.1): every (instance, method,
+seed) combination is one run, launched as its own subprocess via
 _run_matrix_worker.py (real OS-level timeout + crash isolation -- a hung or
 crashed run can't take the whole batch down), optionally in parallel.
 
-Resumable: a (instance, method, seed) already present in the output
-workbook's "Runs" sheet is skipped, so an interrupted run can just be
-re-invoked with the same --out path.
+Raw results are appended one JSON line at a time to a companion .jsonl file
+next to --out (flushed+fsynced after every run -- see aggregate.append_jsonl)
+rather than loaded/saved as xlsx per row: re-saving an xlsx workbook costs
+more the bigger it already is, so appending one row at a time that way is
+O(n) per row / O(n^2) overall (measured: ~3.2s per append at 10k existing
+rows) and, since openpyxl's save isn't atomic, a run killed mid-save can
+leave the whole workbook corrupted. The JSONL is the actual source of
+truth; the xlsx (Runs + summary sheets) is rebuilt from it once at the end
+of the batch, or any time via `python experiments/aggregate.py <out.xlsx>`.
+
+Resumable: a (instance, method, seed) already present in the JSONL is
+skipped, so an interrupted run can just be re-invoked with the same --out.
 
 Usage:
     python experiments/run_matrix.py --limit 30 --seeds 0 1 --time-limit 120
@@ -24,12 +33,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import openpyxl
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from methods import METHODS, METHOD_ORDER, COMMON  # noqa: E402
 from aggregate import (  # noqa: E402
-    RUNS_SHEET, read_sheet_as_dicts, rebuild_summary_sheets,
+    jsonl_path_for, read_jsonl, append_jsonl, rebuild_workbook,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -37,16 +44,6 @@ WORKER = Path(__file__).parent / "_run_matrix_worker.py"
 DEFAULT_DIR = Path(__file__).parent / "binary_instances"
 
 EXT_PRIORITY = [".mps.gz", ".mps", ".lp.gz", ".lp"]
-
-RUNS_COLUMNS = [
-    "instance", "type", "n_bin", "n_cont", "n_cons",
-    "method", "cut_mode", "probe_k", "seed",
-    "reason", "feasible", "proved_optimal", "best_obj", "bound", "gap",
-    "first_feasible_iter", "first_feasible_time", "n_feasible_found", "n_incumbent_updates",
-    "iterations", "perturbations", "cuts_added", "cuts_by_type",
-    "face_probe_cuts", "probe_vertex_cuts", "fallback_cuts",
-    "time_sec", "git_commit", "timestamp",
-]
 
 
 def git_short_hash() -> str:
@@ -118,39 +115,19 @@ def run_one(instance_path: Path, method: str, seed: int, time_limit: float, use_
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def _load_existing_keys(path: Path) -> set[tuple]:
-    if not path.exists():
-        return set()
-    rows = read_sheet_as_dicts(path, RUNS_SHEET)
+def _load_existing_keys(jsonl_path: Path) -> set[tuple]:
+    rows = read_jsonl(jsonl_path)
     return {(r["instance"], r["method"], int(r["seed"])) for r in rows}
-
-
-def _ensure_workbook(path: Path) -> None:
-    if path.exists():
-        return
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-    ws = wb.create_sheet(RUNS_SHEET)
-    ws.append(RUNS_COLUMNS)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
-
-
-def _append_row(path: Path, row: dict) -> None:
-    wb = openpyxl.load_workbook(path)
-    ws = wb[RUNS_SHEET]
-    cuts_by_type = row.get("cuts_by_type")
-    ws.append([
-        json.dumps(cuts_by_type) if c == "cuts_by_type" and isinstance(cuts_by_type, dict)
-        else row.get(c)
-        for c in RUNS_COLUMNS
-    ])
-    wb.save(path)
 
 
 def _write_config_sheet(path: Path, args: argparse.Namespace) -> None:
     import gurobipy as gp
-    wb = openpyxl.load_workbook(path)
+    import openpyxl
+    if path.exists():
+        wb = openpyxl.load_workbook(path)
+    else:
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
     if "Config" in wb.sheetnames:
         del wb["Config"]
     ws = wb.create_sheet("Config")
@@ -172,6 +149,7 @@ def _write_config_sheet(path: Path, args: argparse.Namespace) -> None:
     ]
     for k, v in rows:
         ws.append([k, v])
+    path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
 
 
@@ -211,8 +189,8 @@ def main() -> None:
         Path(__file__).parent / "results" /
         f"{datetime.date.today():%Y%m%d}_{git_short_hash()}_{args.tag}.xlsx"
     )
-    _ensure_workbook(out_path)
-    done = _load_existing_keys(out_path)
+    jsonl_path = jsonl_path_for(out_path)
+    done = _load_existing_keys(jsonl_path)
 
     jobs = [
         (p, m, s)
@@ -223,12 +201,14 @@ def main() -> None:
     worst_case_hours = len(jobs) * args.time_limit / max(1, args.workers) / 3600
 
     print(f"{len(instances)} instances x {len(args.methods)} methods x {len(args.seeds)} seeds "
-          f"= {total_jobs} runs ({len(done)} already in {out_path.name}, {len(jobs)} to do).")
+          f"= {total_jobs} runs ({len(done)} already in {jsonl_path.name}, {len(jobs)} to do).")
     print(f"Worst case: ~{worst_case_hours:.2f}h with {args.workers} workers "
           f"(time_limit={args.time_limit}s/run).")
     if not jobs:
         print("Nothing to do.")
-        rebuild_summary_sheets(out_path)
+        if done:
+            _write_config_sheet(out_path, args)
+            rebuild_workbook(out_path)
         return
     if not args.yes:
         resp = input("Proceed? [y/N] ")
@@ -253,7 +233,7 @@ def main() -> None:
             row.setdefault("probe_k", METHODS[m]["probe_k"])
             row["seed"] = s
             row.setdefault("git_commit", git_short_hash())
-            _append_row(out_path, row)
+            append_jsonl(jsonl_path, row)
             n_done += 1
             print(f"[{n_done}/{len(jobs)}] {row['instance']} / {m} / seed={s} "
                   f"-> {row.get('reason')} ({row.get('time_sec', 0):.2f}s)")
@@ -262,8 +242,8 @@ def main() -> None:
     print(f"Done: {n_done} runs in {elapsed:.1f}s ({elapsed / max(1, n_done):.2f}s/run avg).")
 
     _write_config_sheet(out_path, args)
-    rebuild_summary_sheets(out_path)
-    print(f"Wrote {out_path}")
+    rebuild_workbook(out_path)
+    print(f"Wrote {out_path} (raw rows: {jsonl_path})")
 
 
 if __name__ == "__main__":

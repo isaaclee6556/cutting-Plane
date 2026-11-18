@@ -656,6 +656,14 @@ def feasibility_pump(
         return FPResult(False, None, 0, "time_limit", time_sec=_elapsed())
     if kind0 != "optimal":
         if mode == "optimality":
+            # Only a genuine INFEASIBLE status proves infeasibility; an
+            # unbounded *relaxation* (e.g. an unconstrained continuous
+            # variable with a favorable objective coefficient, before any
+            # cuts exist) is a real, distinct outcome, not a proof of
+            # infeasibility -- conflating the two would falsely claim
+            # proved_optimal=True.
+            if kind0 == "unbounded":
+                return _finish("unbounded_relaxation", 0)
             return _finish("infeasible", 0)
         return FPResult(False, None, 0, "lp_infeasible")
 
@@ -705,7 +713,12 @@ def feasibility_pump(
                 if verbose:
                     print(f"[FP] unbounded at iter {k}")
                 return _finish("unbounded", k + 1)
-            if status == "feasible":
+            if status == "feasible" and z_key not in visited:
+                # z_key in visited means this exact point was already
+                # evaluated on an earlier iteration (before this cycle came
+                # back around) -- the result is identical (deterministic),
+                # so counting it again would double (or endlessly re-)count
+                # the same feasible point in n_feasible_found.
                 _record_feasible(k, obj, sol)
                 if verbose:
                     print(f"[FP]   z feasible, obj={obj}, incumbent U={U}")
@@ -737,9 +750,15 @@ def feasibility_pump(
                                 probe_vertex_cuts=probe_vertex_cuts, time_sec=_elapsed())
             if kind != "optimal":
                 if mode == "optimality":
-                    if U is not None:
-                        bound = U  # region now empty -> U is exactly optimal, gap=0
-                    return _finish("optimal" if U is not None else "infeasible", k + 1)
+                    # Only a genuine INFEASIBLE status is a proof (the region
+                    # under cuts+cutoff is provably empty); "unbounded"/
+                    # "other" here means something numerically went wrong,
+                    # not that optimality/infeasibility was established.
+                    if kind == "infeasible":
+                        if U is not None:
+                            bound = U  # region now empty -> U is exactly optimal, gap=0
+                        return _finish("optimal" if U is not None else "infeasible", k + 1)
+                    return _finish("numerical", k + 1)
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
                                 total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
                                 probe_vertex_cuts=probe_vertex_cuts)
@@ -968,6 +987,7 @@ def feasibility_pump(
             if kind == "optimal":
                 bound = relax.ObjVal
                 if _bound_proves_optimal(orig_sense, bound, U, _delta()):
+                    bound = U  # tightened: proof means the true optimum is exactly U, gap=0
                     return _finish("optimal" if U is not None else "infeasible", k + 1)
             elif kind == "infeasible":
                 if U is not None:
@@ -984,11 +1004,14 @@ def feasibility_pump(
                 return _finish("time_limit", k + 1)
             if kind2 != "optimal":
                 # Same feasible region as the bound solve just above (only
-                # the objective differs), so this almost never triggers in
-                # practice -- but if it does, the region really is empty.
-                if U is not None:
-                    bound = U
-                return _finish("optimal" if U is not None else "infeasible", k + 1)
+                # the objective differs), so an INFEASIBLE status here is
+                # just as valid a proof as it would have been there; but
+                # "unbounded"/"other" is a numerical anomaly, not a proof.
+                if kind2 == "infeasible":
+                    if U is not None:
+                        bound = U
+                    return _finish("optimal" if U is not None else "infeasible", k + 1)
+                return _finish("numerical", k + 1)
         else:
             _set_projection_objective(relax, int_vars, z_dict)
             relax.optimize()
