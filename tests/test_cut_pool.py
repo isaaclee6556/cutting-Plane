@@ -10,7 +10,7 @@ All fractional points are synthetic; no Gurobi required.
 
 from structural_fp import StructureIndex
 from structural_fp.cuts import (
-    VertexCut, EdgeCut, SquareCut, StarCut, CubeCut, TulipCut,
+    VertexCut, EdgeCut, SquareCut, StarCut, CubeCut, TulipCut, PropellerCut,
     cuts_from_index,
 )
 from structural_fp.cut_pool import dominance_prune, select_cuts
@@ -172,6 +172,48 @@ class TestDominancePruneCubeStarTulip:
         cuts = cuts_from_index(idx)
         result = dominance_prune(cuts)
         assert any(isinstance(c, StarCut) for c in result)
+
+
+class TestDominancePruneCubePropeller:
+    """
+    Cube cuts dominate Propeller cuts anchored at their own corners, when
+    the propeller's axis+blades are confined to the cube's free dirs.
+    Mirrors TestDominancePruneCubeStarTulip. A native propeller needs >= 4
+    directions (axis + >= 3 blades) but a native 3-dim cube's free is
+    always size 3, so this rule is only reachable against a face-probe
+    cube with |free| >= 4 -- built directly here rather than through
+    StructureIndex/embedded_cube_index.
+    """
+
+    def test_cube_prunes_its_own_propeller(self):
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2, 3}), n=6)
+        propeller = PropellerCut(z=0, axis=0, blades=frozenset({1, 2, 3}), n=6)
+        result = dominance_prune([cube, propeller])
+        assert not any(isinstance(c, PropellerCut) for c in result)
+
+    def test_propeller_with_blade_outside_free_survives(self):
+        # blade 4 is outside the cube's free={0,1,2,3} -> dominance proof
+        # doesn't apply.
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2, 3}), n=6)
+        propeller = PropellerCut(z=0, axis=0, blades=frozenset({1, 2, 4}), n=6)
+        result = dominance_prune([cube, propeller])
+        assert any(isinstance(c, PropellerCut) for c in result)
+
+    def test_propeller_anchored_off_cube_survives(self):
+        # anchor disagrees with the cube's base outside free (bit 4 differs)
+        # -> not one of the cube's own corners.
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2, 3}), n=6)
+        propeller = PropellerCut(z=0b010000, axis=0, blades=frozenset({1, 2, 3}), n=6)
+        result = dominance_prune([cube, propeller])
+        assert any(isinstance(c, PropellerCut) for c in result)
+
+    def test_degenerate_full_free_cube_keeps_propeller(self):
+        # free spans every direction: cc's inequality is the unsatisfiable
+        # "0 >= 1", so it must not be used to prune anything.
+        cube = CubeCut(z=0, free=frozenset({0, 1, 2, 3}), n=4)
+        propeller = PropellerCut(z=0, axis=0, blades=frozenset({1, 2, 3}), n=4)
+        result = dominance_prune([cube, propeller])
+        assert any(isinstance(c, PropellerCut) for c in result)
 
 
 class TestDominancePruneStar:

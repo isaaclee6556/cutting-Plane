@@ -214,3 +214,33 @@ class TestFPResult:
     def test_infeasible_solution_is_none(self):
         res = feasibility_pump(make_infeasible_lp_milp())
         assert res.solution is None
+
+
+# ---------------------------------------------------------------------------
+# _FeasChecker must judge feasibility on the original constraints alone
+# ---------------------------------------------------------------------------
+
+class TestFeasCheckerUnboundedObjective:
+    """
+    model.relax() keeps the model's original objective. If _FeasChecker
+    doesn't zero it out, fixing the integer variables can still leave a
+    continuous variable unbounded in the objective's favorable direction,
+    so optimize() reports Status=UNBOUNDED (not OPTIMAL) even though the
+    original *constraints* (ignoring the objective) are clearly satisfied
+    -- is_feasible() would wrongly return False for a genuinely feasible z.
+    """
+
+    def test_feasible_point_not_reported_infeasible_when_objective_unbounded(self):
+        model = gp.Model()
+        model.setParam("OutputFlag", 0)
+        x = model.addVar(vtype=GRB.BINARY, name="x")
+        y = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name="y")  # no upper bound
+        model.addConstr(x + y >= 1)
+        # Unbounded as y -> inf, regardless of x's fixed value.
+        model.setObjective(-y, GRB.MINIMIZE)
+        model.update()
+
+        from structural_fp.fp_loop import _FeasChecker
+        checker = _FeasChecker(model, ["x"])
+        assert checker.is_feasible({"x": 1})  # x=1, y=0 satisfies x+y>=1
+        assert checker.is_feasible({"x": 0})  # x=0, y>=1 (e.g. y=1) also satisfies it

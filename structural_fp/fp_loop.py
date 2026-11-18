@@ -178,6 +178,13 @@ class _FeasChecker:
     def __init__(self, model: gp.Model, int_vars: list[str]) -> None:
         lp = model.relax()
         lp.setParam("OutputFlag", 0)
+        # Feasibility-only: a zero objective means optimize() reports
+        # OPTIMAL as soon as any feasible point exists, and can never come
+        # back UNBOUNDED. model.relax() keeps the original objective, so
+        # without this, a continuous direction left unbounded by the fixed
+        # integer bounds would make is_feasible() return False for a point
+        # that is actually feasible (Status would be UNBOUNDED, not OPTIMAL).
+        lp.setObjective(gp.LinExpr(), GRB.MINIMIZE)
         self._lp = lp
         self._vmap: dict[str, gp.Var] = {v.VarName: v for v in lp.getVars()}
         self._lb0: dict[str, float] = {n: self._vmap[n].LB for n in int_vars}
@@ -340,6 +347,13 @@ def feasibility_pump(
     fallback_cuts = 0
     face_probe_cuts = 0
     added_rows: list[CutRow] = []
+    face_cuts: list[CubeCut] = []
+    # Persistent dedup state (both grow monotonically across iterations, so
+    # rebuilding them from `added_rows` every iteration would cost
+    # O(iterations x history) overall; symbolic cuts are frozen dataclasses,
+    # hence hashable, so membership is O(1) amortized either way).
+    added_symbolic: set[SymbolicCut] = set()
+    added_row_keys: set[tuple] = set()
     n_perturbations = 0
 
     for k in range(max_iter):
@@ -445,7 +459,11 @@ def feasibility_pump(
                 for pos in face_positions:
                     face_base &= ~(1 << pos)
                 face_cut = CubeCut(z=face_base, free=face_free, n=n_ivars)
-                added_rows.append(_add_cut_to_relax(relax, face_cut, sorted_ivars))
+                face_cuts.append(face_cut)
+                face_row = _add_cut_to_relax(relax, face_cut, sorted_ivars)
+                added_rows.append(face_row)
+                added_symbolic.add(face_cut)
+                added_row_keys.add(_row_key(*face_row))
                 total_cuts += 1
                 face_probe_cuts += 1
                 cuts_by_type["CubeCut"] = cuts_by_type.get("CubeCut", 0) + 1
@@ -456,32 +474,43 @@ def feasibility_pump(
             idx.insert(z_mask)
 
             all_cuts = cuts_from_index(idx)
-            if face_cut is not None:
-                # Feed the face-probe cut into the same dominance pass as the
-                # natively-detected shapes. Without this, StructureIndex's own
-                # edge/square/cube/star/tulip detection re-discovers the
-                # sub-faces of the probed face (e.g. at face_k=4, inserting
-                # all 16 corners also yields several native 3-dim sub-cubes),
-                # and dominance_prune never learns those are already implied
-                # by the one cut just added directly to the LP — it only
-                # compares cuts within `all_cuts`. Adding face_cut here lets
-                # the (now size-agnostic) Cube>Cube / Cube>Square / Cube>Star /
-                # Cube>Tulip rules prune those redundant weaker rows instead
-                # of piling them on top of the face cut every iteration.
-                all_cuts = all_cuts + [face_cut]
+            if face_cuts:
+                # Feed every face-probe cut added so far (not just this
+                # iteration's) into the same dominance pass as the
+                # natively-detected shapes. StructureIndex's own edge/
+                # square/cube/star/tulip/propeller detection keeps
+                # re-discovering the sub-faces of an already-probed face on
+                # every later iteration (idx never forgets anything), and
+                # dominance_prune only ever sees what's in `all_cuts` — so a
+                # face_cut from iteration k that isn't still passed in at
+                # iteration k+1 lets its own sub-structures look "not yet
+                # dominated" again and leak back into the LP as new
+                # (redundant, weaker) rows. Passing the full history here
+                # lets the (now size-agnostic) Cube>Cube / Cube>Square /
+                # Cube>Star / Cube>Tulip / Cube>Propeller rules keep pruning
+                # them on every iteration, not just the one they were born in.
+                all_cuts = all_cuts + face_cuts
             selected = select_cuts(all_cuts)
 
-            # Exact-duplicate guard: dominance_prune only sees candidates
-            # from idx, so it can't know about rows added outside this call
-            # (e.g. the face-probe CubeCut just added above). When
-            # StructureIndex re-detects that same face as a native cube
-            # (always happens when face_k == 3, its own cube size), this
-            # row-level check is what actually stops it being added twice.
-            added_row_keys = {_row_key(c, r) for c, r in added_rows}
+            # Dedup against everything added so far, two layers deep:
+            # (1) added_symbolic -- skip to_inequality() entirely for a cut
+            #     that is structurally identical (same type/anchor/dirs) to
+            #     one already added, which is the common case and the one
+            #     worth avoiding the O(n) dict-building cost for, since
+            #     cuts_from_index regenerates the *entire* accumulated
+            #     structure every iteration.
+            # (2) added_row_keys -- exact-duplicate-row guard for the rare
+            #     case of two different symbolic cuts producing the same
+            #     (coeffs, rhs) row (e.g. a face-probe CubeCut built
+            #     directly vs. the same face re-detected natively, when
+            #     those don't already compare equal as dataclasses).
             n_added = 0
             for cut in selected:
+                if cut in added_symbolic:
+                    continue
                 coeffs, rhs = cut.to_inequality()
                 key = _row_key(coeffs, rhs)
+                added_symbolic.add(cut)
                 if key in added_row_keys:
                     continue
                 added_row_keys.add(key)
@@ -498,7 +527,11 @@ def feasibility_pump(
             # Dominated or unviolated cuts may leave z uncovered, so add its
             # VertexCut unconditionally in that case.
             if not any(_row_excludes(r, z_mask) for r in added_rows):
-                added_rows.append(_add_cut_to_relax(relax, VertexCut(z=z_mask, n=n_ivars), sorted_ivars))
+                fallback_vc = VertexCut(z=z_mask, n=n_ivars)
+                fallback_row = _add_cut_to_relax(relax, fallback_vc, sorted_ivars)
+                added_rows.append(fallback_row)
+                added_symbolic.add(fallback_vc)
+                added_row_keys.add(_row_key(*fallback_row))
                 total_cuts += 1
                 fallback_cuts += 1
                 cuts_by_type["VertexCut"] = cuts_by_type.get("VertexCut", 0) + 1

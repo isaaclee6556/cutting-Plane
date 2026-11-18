@@ -109,3 +109,28 @@ class TestFaceProbeNoEcho:
         # Exactly one CubeCut row per face probe -- never duplicated via
         # the native re-detection of the same face.
         assert res.cuts_by_type.get("CubeCut", 0) == res.face_probe_cuts
+
+    def test_face_k4_no_echo_across_later_iterations(self):
+        """
+        Regression test for a bug where a face_k>=4 probe's own CubeCut
+        only suppressed its face's native sub-structures (sub-cubes/
+        squares/stars/tulips/propellers) in the SAME iteration it was
+        created. fp_loop only passed `[face_cut]` (this iteration's cut)
+        into the dominance pass, not the full history of face cuts -- so on
+        any LATER iteration, cuts_from_index(idx) re-derives those same
+        sub-structures from idx (which never forgets), dominance_prune has
+        no face cut in the pool to prune them against, and they leak back
+        into the LP as new (weaker, redundant) rows. With face_k=3 this was
+        masked because the echo is an exact-duplicate row of the face cut
+        itself (caught by the row-key guard); at k=4 the echoes are
+        genuinely different (weaker) rows that only cube-dominance, fed the
+        right history, can catch.
+        """
+        res = feasibility_pump(
+            make_random_covering_milp(n=40, m=35, seed=1),
+            use_structural_cuts=True, use_face_probe=True, face_k=4,
+            debug_check_cover=True,
+            max_perturbations=5, perturb_scale=0.4, random_seed=1, max_iter=30,
+        )
+        assert res.face_probe_cuts >= 1
+        assert res.cuts_by_type.get("CubeCut", 0) == res.face_probe_cuts

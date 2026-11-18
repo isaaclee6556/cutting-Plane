@@ -12,6 +12,14 @@ import gurobipy as gp
 # does up to 2**face_k feasibility checks per iteration) wastes the results of
 # the other 3. Guarding each call individually keeps the other methods' results
 # even when one of them times out. Override with the FP_METHOD_TIMEOUT env var.
+#
+# Known limitation: SIGALRM only interrupts between Python bytecode
+# instructions, so it can't fire while execution is inside a single Gurobi
+# C call (e.g. one long optimize()) -- the alarm is still pending and raises
+# _MethodTimeout as soon as that call returns, but a single slow LP solve can
+# overrun PER_METHOD_TIMEOUT before that happens. A tighter bound would need
+# Gurobi's own per-model TimeLimit param threaded through feasibility_pump()
+# (not currently exposed) in addition to this outer guard.
 PER_METHOD_TIMEOUT = int(os.environ.get("FP_METHOD_TIMEOUT", "120"))
 
 

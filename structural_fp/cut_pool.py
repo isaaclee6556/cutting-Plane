@@ -61,9 +61,10 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
 
     Dominance hierarchy (stronger cuts make weaker ones redundant):
       Cube  >  Square  >  Edge  >  Vertex
-      Cube  >  Star, Tulip anchored at one of the cube's own corners
-               (only when the star's leaves / the tulip's K|L lie entirely
-               within the cube's free directions — see proof below).
+      Cube  >  Star, Tulip, Propeller anchored at one of the cube's own
+               corners (only when the star's leaves / the tulip's K|L /
+               the propeller's axis+blades lie entirely within the cube's
+               free directions — see proof below).
       Star, Tulip, Propeller: keep only the maximal structure per anchor.
 
     A cut A dominates B when: every x satisfying A also satisfies B
@@ -89,6 +90,16 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
       trigger (popcount(D) >= 3) and the Tulip trigger at every one of the
       corners it just added, so without this rule each face-probe cut would
       be shadowed by up to 2*2^k redundant Star/Tulip cuts.
+      Cube > Propeller: same argument again. A PropellerCut(z, axis a,
+      blades B) weights every direction outside {a} ∪ B by 2 (axis itself
+      is excluded from the sum entirely). If {a} ∪ B ⊆ cc.free and the
+      propeller's z agrees with cc.z outside free, every direction outside
+      free is also outside {a} ∪ B, so that weighted-2 group sums to
+      >= 2*1 = 2 whenever cc's inequality holds -- exactly meeting the
+      propeller's own rhs of 2. A native propeller needs >= 4 directions
+      (axis + >= 3 blades), so this can only fire against a cube with
+      |free| >= 4 (a face-probe cube at k>=4) -- the native k=3 cube from
+      StructureIndex can never satisfy {a} ∪ B ⊆ free since |free| = 3.
     """
     dominated: set[int] = set()  # id() of dominated cut objects
 
@@ -144,10 +155,11 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
                 dominated.add(id(sc))
                 break
 
-    # --- Cube > Star/Tulip anchored at one of the cube's own corners ---
-    # See the proof in the docstring above. Only applies when the anchor
-    # agrees with the cube's base outside `free` (it's one of the cube's
-    # own corners) and the star's/tulip's directions are confined to `free`.
+    # --- Cube > Star/Tulip/Propeller anchored at one of the cube's own
+    # corners --- See the proof in the docstring above. Only applies when
+    # the anchor agrees with the cube's base outside `free` (it's one of
+    # the cube's own corners) and the structure's directions are confined
+    # to `free`.
     for cc in cube_cuts:
         if len(cc.free) >= cc.n:
             # Degenerate case: free spans every direction, so cc's own
@@ -155,8 +167,9 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
             # by any x. The dominance argument is vacuously true (cc's
             # feasible set is empty) but operationally meaningless here:
             # adding cc already makes the relaxation infeasible outright,
-            # so there is nothing to gain by also pruning Star/Tulip based
-            # on it (and tests pin the current behavior of keeping them).
+            # so there is nothing to gain by also pruning Star/Tulip/
+            # Propeller based on it (and tests pin the current behavior of
+            # keeping them).
             continue
         for sc in star_cuts:
             if id(sc) in dominated:
@@ -168,6 +181,11 @@ def dominance_prune(cuts: list[SymbolicCut]) -> list[SymbolicCut]:
                 continue
             if (tc.K | tc.L) <= cc.free and _agrees_outside(tc.z, cc.z, cc.free, cc.n):
                 dominated.add(id(tc))
+        for pc in propeller_cuts:
+            if id(pc) in dominated:
+                continue
+            if ({pc.axis} | pc.blades) <= cc.free and _agrees_outside(pc.z, cc.z, cc.free, cc.n):
+                dominated.add(id(pc))
 
     # --- Cube > Cube (a bigger face dominates one of its own sub-faces) ---
     # Same argument as Cube > Square, generalized: if free_B is a strict
