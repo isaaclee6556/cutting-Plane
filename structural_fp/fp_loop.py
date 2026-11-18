@@ -1,27 +1,41 @@
 """
 Feasibility pump with optional structural cuts and cycle-breaking perturbation
-(Milestones 4–6).
+(Milestones 4-6), plus an optional optimality-search overlay (M11).
 
-Algorithm (per iteration):
-  1. Solve LP relaxation (+ any accumulated structural cuts) → x_hat.
-  2. Round each integer var to nearest integer → z_dict.
+Algorithm (per iteration), mode="feasibility" (default, unchanged from before M11):
+  1. Solve LP relaxation (+ any accumulated structural cuts) -> x_hat.
+  2. Round each integer var to nearest integer -> z_dict.
   3. Feasibility check: fix integer vars to z_dict, solve LP.
-     If feasible → return z_dict.
-  4. Cycle detection: if z_dict already visited →
+     If feasible -> return z_dict.
+  4. Cycle detection: if z_dict already visited ->
        - if perturbations < max_perturbations: perturb, clear visited, continue.
        - else: stop (reason="cycle").
   5. (Optional) Insert z into StructureIndex; generate and add every
      dominance-surviving cut (no violation filtering, no cap).
   6. Change objective to minimize L1 distance to z_dict (projection).
-  7. Solve projection LP → new x_hat.  Repeat.
+  7. Solve projection LP -> new x_hat.  Repeat.
+
+Algorithm, mode="optimality" (M11): same loop, but step 3 evaluates the
+*original* objective's optimal continuous completion instead of just
+feasibility, tracks an incumbent (best feasible solution found so far) and
+a valid lower/upper bound on the true optimum (via the LP relaxation plus
+whatever cuts + a cutoff constraint have been added so far), and terminates
+with a proof of optimality (or infeasibility) once the bound can no longer
+beat the incumbent. Every rounded/probed point -- whether infeasible or
+feasible-but-not-improving -- is still inserted into the StructureIndex and
+still receives cuts exactly as in feasibility mode, since the goal is to
+exhaustively rule out the region "at least as good as the incumbent", not
+to stop at the first feasible point.
 
 Pass use_structural_cuts=True to enable Milestone 5 cut generation.
 Pass max_perturbations > 0 to enable Milestone 6 cycle-breaking.
+Pass mode="optimality" to enable Milestone 11 optimality search.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 import random
+import time
 import gurobipy as gp
 from gurobipy import GRB
 
@@ -162,28 +176,113 @@ def _set_projection_objective(
 
 
 # ---------------------------------------------------------------------------
+# Optimality-mode helpers (M11)
+# ---------------------------------------------------------------------------
+
+def _solve_status_kind(m: gp.Model) -> str:
+    """
+    Classify a just-completed optimize() call as one of:
+    "optimal" | "infeasible" | "unbounded" | "time_limit" | "other".
+
+    INF_OR_UNBD is disambiguated by re-solving with DualReductions=0 (left at
+    0 afterward -- slightly less presolve, but this model is only ever used
+    for cheap LP/relaxation solves, and disambiguating is more important than
+    that marginal speed).
+    """
+    s = m.Status
+    if s == GRB.OPTIMAL:
+        return "optimal"
+    if s == GRB.INFEASIBLE:
+        return "infeasible"
+    if s == GRB.UNBOUNDED:
+        return "unbounded"
+    if s == GRB.TIME_LIMIT:
+        return "time_limit"
+    if s == GRB.INF_OR_UNBD:
+        m.setParam("DualReductions", 0)
+        m.optimize()
+        return _solve_status_kind(m)
+    return "other"
+
+
+def _apply_time_limit(m: gp.Model, time_limit: Optional[float], elapsed: float) -> None:
+    """Give `m` whatever's left of the overall wall-clock budget, if any."""
+    if time_limit is not None:
+        m.setParam("TimeLimit", max(0.0, time_limit - elapsed))
+
+
+def _obj_is_pure_integer(model: gp.Model, int_var_set: set[str]) -> bool:
+    """True if every continuous variable has a zero objective coefficient and
+    every integer/binary variable has an integer objective coefficient --
+    i.e. the objective can only ever take integer values, so any improvement
+    is by at least 1."""
+    obj = model.getObjective()
+    for i in range(obj.size()):
+        v = obj.getVar(i)
+        c = obj.getCoeff(i)
+        if v.VarName in int_var_set:
+            if abs(c - round(c)) > 1e-9:
+                return False
+        else:
+            if abs(c) > 1e-9:
+                return False
+    return True
+
+
+def _effective_delta(user_obj_tol: Optional[float], obj_is_integer: bool, U: Optional[float]) -> float:
+    """Minimum improvement required to count as "better than the incumbent"."""
+    if user_obj_tol is not None:
+        return user_obj_tol
+    if obj_is_integer:
+        return 1.0 - 1e-6
+    return max(1e-6, 1e-6 * abs(U if U is not None else 0.0))
+
+
+def _improves(sense: int, obj: float, U: Optional[float], delta: float) -> bool:
+    """True if `obj` is a strict improvement over incumbent `U` (or there is
+    no incumbent yet)."""
+    if U is None:
+        return True
+    return (obj <= U - delta) if sense == GRB.MINIMIZE else (obj >= U + delta)
+
+
+def _bound_proves_optimal(sense: int, L: float, U: Optional[float], delta: float) -> bool:
+    """True if bound `L` rules out any solution better than incumbent `U` by
+    more than `delta` -- i.e. U is proven (near-)optimal. False (not yet
+    proven) whenever there is no incumbent to compare against."""
+    if U is None:
+        return False
+    return (L >= U - delta) if sense == GRB.MINIMIZE else (L <= U + delta)
+
+
+# ---------------------------------------------------------------------------
 # Feasibility checker (reusable across iterations)
 # ---------------------------------------------------------------------------
 
 class _FeasChecker:
     """
-    Reusable LP feasibility checker.
+    Reusable LP feasibility/evaluation checker.
 
     Holds a separate relaxed copy of the model.  Each call to is_feasible()
-    temporarily fixes integer variable bounds to the given z values, solves,
-    then resets bounds.  Uses a single Gurobi model throughout to amortize
-    model-build overhead.
+    or evaluate() temporarily fixes integer variable bounds to the given z
+    values, solves, then resets bounds.  Uses a single Gurobi model
+    throughout to amortize model-build overhead.
     """
 
     def __init__(self, model: gp.Model, int_vars: list[str]) -> None:
         lp = model.relax()
         lp.setParam("OutputFlag", 0)
-        # Feasibility-only: a zero objective means optimize() reports
+        # model.relax() carries over the original objective/sense verbatim;
+        # capture both before overwriting the objective below, so evaluate()
+        # can still solve the *original* objective on demand (M11).
+        self._orig_obj_expr = lp.getObjective()
+        self._orig_sense = lp.ModelSense
+        # Feasibility-only default: a zero objective means optimize() reports
         # OPTIMAL as soon as any feasible point exists, and can never come
-        # back UNBOUNDED. model.relax() keeps the original objective, so
-        # without this, a continuous direction left unbounded by the fixed
-        # integer bounds would make is_feasible() return False for a point
-        # that is actually feasible (Status would be UNBOUNDED, not OPTIMAL).
+        # back UNBOUNDED. Without this, a continuous direction left unbounded
+        # by the fixed integer bounds would make is_feasible() return False
+        # for a point that is actually feasible (Status would be UNBOUNDED,
+        # not OPTIMAL).
         lp.setObjective(gp.LinExpr(), GRB.MINIMIZE)
         self._lp = lp
         self._vmap: dict[str, gp.Var] = {v.VarName: v for v in lp.getVars()}
@@ -207,6 +306,42 @@ class _FeasChecker:
         lp.update()
         return ok
 
+    def evaluate(self, z_dict: dict[str, int]) -> tuple[str, Optional[float], Optional[dict[str, float]]]:
+        """
+        Fix integer vars to z_dict, solve the *original* objective (native
+        sense) over the continuous completion.
+
+        Returns (status, native_obj_value, full_solution):
+          status in {"feasible", "infeasible", "unbounded"}.
+          native_obj_value, full_solution are None unless status=="feasible".
+          full_solution is {var_name: value} for *every* variable (int and
+          continuous), captured right after the solve so it reflects this
+          exact z (not whatever z the checker is next used for).
+        """
+        lp = self._lp
+        for n, val in z_dict.items():
+            v = self._vmap[n]
+            v.LB = v.UB = float(val)
+        lp.setObjective(self._orig_obj_expr, self._orig_sense)
+        lp.update()
+        lp.optimize()
+        kind = _solve_status_kind(lp)
+        if kind == "optimal":
+            result = ("feasible", lp.ObjVal, {v.VarName: v.X for v in lp.getVars()})
+        elif kind == "unbounded":
+            result = ("unbounded", None, None)
+        else:  # "infeasible" or unexpected ("time_limit"/"other" -> treat as infeasible)
+            result = ("infeasible", None, None)
+        # Reset to original relaxation bounds and the feasibility-only
+        # zero objective, so a later is_feasible() call behaves as documented.
+        for n in self._int_vars:
+            v = self._vmap[n]
+            v.LB = self._lb0[n]
+            v.UB = self._ub0[n]
+        lp.setObjective(gp.LinExpr(), GRB.MINIMIZE)
+        lp.update()
+        return result
+
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -217,11 +352,17 @@ class FPResult:
     """
     Return value from feasibility_pump().
 
-    feasible      : True if a feasible integer solution was found.
-    solution      : {var_name: int_value} for integer variables when feasible,
-                    None otherwise.
+    feasible      : mode="feasibility": True if a feasible integer solution
+                    was found. mode="optimality": True if at least one
+                    incumbent was found (equivalent to n_feasible_found > 0).
+    solution      : {var_name: int_value} for integer variables when
+                    feasible, None otherwise (the best incumbent's integer
+                    part, in optimality mode).
     iterations    : number of pump iterations executed (1-based).
     reason        : "feasible" | "cycle" | "lp_infeasible" | "max_iter"
+                    (mode="feasibility"), or "optimal" | "infeasible" |
+                    "unbounded" | "cycle" | "max_iter" | "time_limit"
+                    (mode="optimality").
     history       : sequence of rounded points (as sorted tuples) visited.
     cuts_added    : total structural cut constraints added to the LP.
     perturbations : number of cycle-breaking perturbations applied.
@@ -231,6 +372,26 @@ class FPResult:
                     excluded (structural mode); already included in cuts_added.
     face_probe_cuts : CubeCuts added by the face-probe step (use_face_probe);
                     already included in cuts_added and in cuts_by_type["CubeCut"].
+
+    Optimality-mode fields (M11; all None/0/empty in mode="feasibility"):
+    mode              : "feasibility" | "optimality".
+    best_obj          : incumbent objective value, original sense/sign.
+    best_solution     : {var_name: value} for *every* variable (int and
+                        continuous) of the best incumbent, or None.
+    bound             : latest valid bound on the true optimum (original
+                        sense/sign), or None if never computed.
+    gap               : |best_obj - bound| / max(|best_obj|, 1e-10), or None
+                        if best_obj or bound is unavailable.
+    proved_optimal    : True if reason is "optimal" or "infeasible" (a real
+                        proof, not just giving up).
+    n_feasible_found  : number of feasible points evaluated (incumbent or not).
+    n_incumbent_updates : number of times the incumbent actually improved.
+    first_feasible_iter : iteration (0-based) of the first feasible point found.
+    first_feasible_time : wall-clock seconds at that point.
+    incumbent_trace   : list of (iteration, wall_clock_seconds, best_obj) at
+                        each incumbent update.
+    time_sec          : total wall-clock seconds for this call (optimality
+                        mode only; 0.0 in feasibility mode).
     """
     feasible: bool
     solution: Optional[dict[str, int]]
@@ -242,6 +403,18 @@ class FPResult:
     cuts_by_type: dict[str, int] = field(default_factory=dict)
     fallback_cuts: int = 0
     face_probe_cuts: int = 0
+    mode: str = "feasibility"
+    best_obj: Optional[float] = None
+    best_solution: Optional[dict[str, float]] = None
+    bound: Optional[float] = None
+    gap: Optional[float] = None
+    proved_optimal: bool = False
+    n_feasible_found: int = 0
+    n_incumbent_updates: int = 0
+    first_feasible_iter: Optional[int] = None
+    first_feasible_time: Optional[float] = None
+    incumbent_trace: list = field(default_factory=list)
+    time_sec: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +434,13 @@ def feasibility_pump(
     debug_check_cover: bool = False,
     use_face_probe: bool = False,
     face_k: int = 3,
+    mode: str = "feasibility",
+    time_limit: Optional[float] = None,
+    obj_tol: Optional[float] = None,
 ) -> FPResult:
     """
-    Feasibility pump with optional structural cuts and cycle-breaking perturbation.
+    Feasibility pump with optional structural cuts, cycle-breaking
+    perturbation, and an optional optimality-search overlay.
 
     Parameters
     ----------
@@ -292,23 +469,45 @@ def feasibility_pump(
                            over many iterations, pick the face_k most-fractional
                            variables at x_hat, fix every other int var at its rounded
                            value z, and check feasibility of all 2^face_k corners of
-                           that face directly. Any feasible corner is returned as the
-                           solution immediately; if all 2^face_k are infeasible, every
-                           corner is inserted into the StructureIndex (so the existing
-                           edge/square/star/... detection can still pick up emergent
-                           structure across them) and a single CubeCut spanning the
-                           whole face is added unconditionally (see cuts.CubeCut — the
-                           formula is valid for any face size, not just k=3).
+                           that face directly. mode="feasibility": any feasible corner
+                           is returned as the solution immediately. mode="optimality":
+                           every corner is evaluated (not just checked for feasibility)
+                           and may update the incumbent; all corners are then always
+                           inserted into the StructureIndex and the whole face is
+                           always cut (see cuts.CubeCut — the formula is valid for any
+                           face size, not just k=3).
     face_k                : number of fractional directions probed by use_face_probe
                            (2**face_k feasibility checks per iteration). Clamped to
                            the number of integer variables AND to the number of
                            directions actually fractional at x_hat this iteration
                            (never padded with already-integral directions).
+    mode                  : "feasibility" (default, finds and returns the first
+                           feasible point) or "optimality" (M11: tracks an
+                           incumbent and a valid bound, and only stops once the
+                           bound proves the incumbent -- or infeasibility -- or
+                           it gives up via cycle/max_iter/time_limit). See
+                           FPResult's optimality-mode fields.
+    time_limit            : overall wall-clock budget in seconds. Checked once
+                           per iteration and also handed to Gurobi as each
+                           solve's own TimeLimit, so a single slow solve can't
+                           blow far past the budget. None (default) = no limit.
+    obj_tol               : minimum improvement (in the original objective's
+                           own units) required for a new incumbent to count as
+                           "better", and slack in the optimality bound check.
+                           None (default) picks it automatically: 1 - 1e-6 if
+                           the objective can only take integer values (every
+                           continuous var has coefficient 0, every integer
+                           var's coefficient is an integer), else
+                           max(1e-6, 1e-6 * |incumbent|). Only meaningful in
+                           mode="optimality".
 
     Returns
     -------
-    FPResult — check .feasible, .solution, .cuts_added, .perturbations.
+    FPResult — check .feasible, .solution, .cuts_added, .perturbations, and
+    (mode="optimality") .best_obj, .bound, .gap, .proved_optimal.
     """
+    if mode not in ("feasibility", "optimality"):
+        raise ValueError(f"mode must be 'feasibility' or 'optimality', got {mode!r}")
     if use_structural_cuts and use_no_good_cuts:
         raise ValueError(
             "use_structural_cuts and use_no_good_cuts are mutually exclusive"
@@ -322,12 +521,21 @@ def feasibility_pump(
         _require_binary(model, int_vars)
     sorted_ivars = sorted(int_vars)
     n_ivars = len(sorted_ivars)
+    int_var_set = set(int_vars)
 
     rng = random.Random(random_seed)
+    t_start = time.perf_counter()
+
+    def _elapsed() -> float:
+        return time.perf_counter() - t_start
 
     # Projection LP (shared; objective + cuts accumulate here)
     relax = model.relax()
     relax.setParam("OutputFlag", 0)
+    # Captured before anything overwrites relax's objective (M11 bound step
+    # and the optimality cutoff constraint both need the *original* one).
+    relax_orig_obj_expr = relax.getObjective()
+    orig_sense = relax.ModelSense
 
     # Feasibility checker uses original constraints only (no cuts)
     checker = _FeasChecker(model, int_vars)
@@ -335,17 +543,88 @@ def feasibility_pump(
     # Structure index (only used when use_structural_cuts=True)
     idx = StructureIndex(n_ivars) if use_structural_cuts else None
 
-    # Initial LP solve
-    relax.optimize()
-    if relax.Status != GRB.OPTIMAL:
-        return FPResult(False, None, 0, "lp_infeasible")
+    # --- Optimality-mode bookkeeping (M11). Harmless no-ops in feasibility
+    # mode: initialized unconditionally (cheap) so _finish() below can
+    # always read them, but never populated or returned by any
+    # mode="feasibility" code path. ---
+    U: Optional[float] = None               # incumbent objective (native sense)
+    bound: Optional[float] = None           # latest valid bound (native sense)
+    best_solution: Optional[dict[str, float]] = None
+    n_feasible_found = 0
+    n_incumbent_updates = 0
+    first_feasible_iter: Optional[int] = None
+    first_feasible_time: Optional[float] = None
+    incumbent_trace: list[tuple] = []
+    cutoff_constr = None                     # gp.Constr | None
+    obj_is_integer = _obj_is_pure_integer(model, int_var_set) if mode == "optimality" else False
 
-    visited: set[tuple] = set()
+    def _delta() -> float:
+        return _effective_delta(obj_tol, obj_is_integer, U)
+
+    def _update_cutoff(new_U: float) -> None:
+        nonlocal cutoff_constr
+        rhs = new_U - _delta() if orig_sense == GRB.MINIMIZE else new_U + _delta()
+        if cutoff_constr is None:
+            if orig_sense == GRB.MINIMIZE:
+                cutoff_constr = relax.addConstr(relax_orig_obj_expr <= rhs)
+            else:
+                cutoff_constr = relax.addConstr(relax_orig_obj_expr >= rhs)
+        else:
+            cutoff_constr.RHS = rhs
+        relax.update()
+
+    def _record_feasible(k: int, obj: float, sol: dict[str, float]) -> None:
+        nonlocal U, best_solution, n_feasible_found, n_incumbent_updates
+        nonlocal first_feasible_iter, first_feasible_time
+        n_feasible_found += 1
+        if first_feasible_iter is None:
+            first_feasible_iter = k
+            first_feasible_time = _elapsed()
+        if _improves(orig_sense, obj, U, _delta()):
+            U = obj
+            best_solution = sol
+            n_incumbent_updates += 1
+            incumbent_trace.append((k, _elapsed(), U))
+            _update_cutoff(U)
+
+    def _finish(reason: str, iterations: int) -> FPResult:
+        gap = None
+        if U is not None and bound is not None:
+            gap = abs(U - bound) / max(abs(U), 1e-10)
+        sol_int = None
+        if best_solution is not None:
+            sol_int = {n: int(round(best_solution[n])) for n in int_vars}
+        return FPResult(
+            U is not None, sol_int, iterations, reason, history,
+            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+            mode=mode, best_obj=U, best_solution=best_solution, bound=bound, gap=gap,
+            proved_optimal=reason in ("optimal", "infeasible"),
+            n_feasible_found=n_feasible_found, n_incumbent_updates=n_incumbent_updates,
+            first_feasible_iter=first_feasible_iter, first_feasible_time=first_feasible_time,
+            incumbent_trace=list(incumbent_trace), time_sec=_elapsed(),
+        )
+
+    # Initial LP solve
     history: list[tuple] = []
     total_cuts = 0
     cuts_by_type: dict[str, int] = {}
     fallback_cuts = 0
     face_probe_cuts = 0
+    n_perturbations = 0
+
+    _apply_time_limit(relax, time_limit, _elapsed())
+    relax.optimize()
+    kind0 = _solve_status_kind(relax)
+    if kind0 == "time_limit":
+        if mode == "optimality":
+            return _finish("time_limit", 0)
+        return FPResult(False, None, 0, "time_limit", time_sec=_elapsed())
+    if kind0 != "optimal":
+        if mode == "optimality":
+            return _finish("infeasible", 0)
+        return FPResult(False, None, 0, "lp_infeasible")
+
+    visited: set[tuple] = set()
     added_rows: list[CutRow] = []
     face_cuts: list[CubeCut] = []
     # Persistent dedup state (both grow monotonically across iterations, so
@@ -354,9 +633,16 @@ def feasibility_pump(
     # hence hashable, so membership is O(1) amortized either way).
     added_symbolic: set[SymbolicCut] = set()
     added_row_keys: set[tuple] = set()
-    n_perturbations = 0
 
     for k in range(max_iter):
+        elapsed = _elapsed()
+        if time_limit is not None and elapsed >= time_limit:
+            if mode == "optimality":
+                return _finish("time_limit", k)
+            return FPResult(False, None, k, "time_limit", history,
+                            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                            time_sec=elapsed)
+
         x_hat = {v.VarName: v.X for v in relax.getVars()}
 
         # Step 2 — round each integer variable
@@ -370,18 +656,31 @@ def feasibility_pump(
                 f"  z={z_key}  cuts={total_cuts}  perturb={n_perturbations}"
             )
 
-        # Step 3 — feasibility check (original constraints only)
-        if checker.is_feasible(z_dict):
-            if verbose:
-                print(f"[FP] feasible at iter {k}")
-            return FPResult(True, z_dict, k + 1, "feasible", history,
-                            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+        # Step 3 — feasibility/evaluation check (original constraints only)
+        if mode == "feasibility":
+            if checker.is_feasible(z_dict):
+                if verbose:
+                    print(f"[FP] feasible at iter {k}")
+                return FPResult(True, z_dict, k + 1, "feasible", history,
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+        else:
+            status, obj, sol = checker.evaluate(z_dict)
+            if status == "unbounded":
+                if verbose:
+                    print(f"[FP] unbounded at iter {k}")
+                return _finish("unbounded", k + 1)
+            if status == "feasible":
+                _record_feasible(k, obj, sol)
+                if verbose:
+                    print(f"[FP]   z feasible, obj={obj}, incumbent U={U}")
 
         # Step 4 — cycle detection with optional perturbation
         if z_key in visited:
             if n_perturbations >= max_perturbations:
                 if verbose:
                     print(f"[FP] cycle at iter {k}, no perturbations left")
+                if mode == "optimality":
+                    return _finish("cycle", k + 1)
                 return FPResult(False, None, k + 1, "cycle", history,
                                 total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
             # Perturb: add noise to projection objective and reset visit set
@@ -390,8 +689,20 @@ def feasibility_pump(
             if verbose:
                 print(f"[FP] cycle at iter {k}, applying perturbation {n_perturbations}")
             _set_perturbed_objective(relax, int_vars, z_dict, rng, perturb_scale)
+            _apply_time_limit(relax, time_limit, _elapsed())
             relax.optimize()
-            if relax.Status != GRB.OPTIMAL:
+            kind = _solve_status_kind(relax)
+            if kind == "time_limit":
+                if mode == "optimality":
+                    return _finish("time_limit", k + 1)
+                return FPResult(False, None, k + 1, "time_limit", history,
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts,
+                                time_sec=_elapsed())
+            if kind != "optimal":
+                if mode == "optimality":
+                    if U is not None:
+                        bound = U  # region now empty -> U is exactly optimal, gap=0
+                    return _finish("optimal" if U is not None else "infeasible", k + 1)
                 return FPResult(False, None, k + 1, "lp_infeasible", history,
                                 total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
             continue  # skip normal projection; go to next iteration
@@ -405,10 +716,7 @@ def feasibility_pump(
 
             # Face probe (optional): check all 2^face_k corners of the face
             # spanned by the face_k most-fractional directions, fixing every
-            # other int var at z. Any feasible corner ends the pump outright;
-            # if all are infeasible, insert them all (so the usual edge/
-            # square/star/... detection below can pick up emergent structure)
-            # and add a single CubeCut for the whole face unconditionally.
+            # other int var at z.
             face_cut = None
             if use_face_probe:
                 # Clamp to the number of directions actually fractional at x_hat.
@@ -427,30 +735,59 @@ def feasibility_pump(
                     range(n_ivars), key=lambda i: abs(x_hat[sorted_ivars[i]] - 0.5)
                 )[:k_eff]
                 corner_masks = []
-                feasible_corner = None
-                for combo in range(1 << k_eff):
-                    corner_mask = z_mask
-                    for j, pos in enumerate(face_positions):
-                        if (combo >> j) & 1:
-                            corner_mask |= (1 << pos)
-                        else:
-                            corner_mask &= ~(1 << pos)
-                    corner_masks.append(corner_mask)
-                    if corner_mask == z_mask:
-                        continue  # already confirmed infeasible this iteration
-                    corner_dict = {
-                        name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
-                    }
-                    if checker.is_feasible(corner_dict):
-                        feasible_corner = corner_dict
-                        break
 
-                if feasible_corner is not None:
-                    if verbose:
-                        print(f"[FP] face probe found feasible corner at iter {k}")
-                    return FPResult(True, feasible_corner, k + 1, "feasible", history,
-                                    total_cuts, n_perturbations, dict(cuts_by_type),
-                                    fallback_cuts, face_probe_cuts)
+                if mode == "feasibility":
+                    feasible_corner = None
+                    for combo in range(1 << k_eff):
+                        corner_mask = z_mask
+                        for j, pos in enumerate(face_positions):
+                            if (combo >> j) & 1:
+                                corner_mask |= (1 << pos)
+                            else:
+                                corner_mask &= ~(1 << pos)
+                        corner_masks.append(corner_mask)
+                        if corner_mask == z_mask:
+                            continue  # already confirmed infeasible this iteration
+                        corner_dict = {
+                            name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
+                        }
+                        if checker.is_feasible(corner_dict):
+                            feasible_corner = corner_dict
+                            break
+
+                    if feasible_corner is not None:
+                        if verbose:
+                            print(f"[FP] face probe found feasible corner at iter {k}")
+                        return FPResult(True, feasible_corner, k + 1, "feasible", history,
+                                        total_cuts, n_perturbations, dict(cuts_by_type),
+                                        fallback_cuts, face_probe_cuts)
+                else:
+                    # Optimality mode: never stop early -- evaluate every
+                    # corner (skipping z_mask itself, already evaluated in
+                    # Step 3 above), update the incumbent as needed, and
+                    # unconditionally cut the whole face below (every corner
+                    # ends up excluded either way: infeasible, or feasible
+                    # but not an improvement).
+                    for combo in range(1 << k_eff):
+                        corner_mask = z_mask
+                        for j, pos in enumerate(face_positions):
+                            if (combo >> j) & 1:
+                                corner_mask |= (1 << pos)
+                            else:
+                                corner_mask &= ~(1 << pos)
+                        corner_masks.append(corner_mask)
+                        if corner_mask == z_mask:
+                            continue
+                        corner_dict = {
+                            name: (corner_mask >> i) & 1 for i, name in enumerate(sorted_ivars)
+                        }
+                        status, obj, sol = checker.evaluate(corner_dict)
+                        if status == "unbounded":
+                            if verbose:
+                                print(f"[FP] unbounded (face-probe corner) at iter {k}")
+                            return _finish("unbounded", k + 1)
+                        if status == "feasible":
+                            _record_feasible(k, obj, sol)
 
                 for cm in corner_masks:
                     idx.insert(cm)
@@ -468,8 +805,8 @@ def feasibility_pump(
                 face_probe_cuts += 1
                 cuts_by_type["CubeCut"] = cuts_by_type.get("CubeCut", 0) + 1
                 if verbose:
-                    print(f"[FP]   face probe: all {1 << k_eff} corners infeasible, "
-                          f"added CubeCut over {sorted(face_positions)} (total {total_cuts})")
+                    print(f"[FP]   face probe: added CubeCut over {sorted(face_positions)} "
+                          f"(total {total_cuts})")
 
             idx.insert(z_mask)
 
@@ -557,14 +894,48 @@ def feasibility_pump(
             if verbose:
                 print(f"[FP]   added no-good cut (total {total_cuts})")
 
-        # Step 6 — projection LP
-        _set_projection_objective(relax, int_vars, z_dict)
-        relax.optimize()
-        if relax.Status != GRB.OPTIMAL:
-            return FPResult(False, None, k + 1, "lp_infeasible", history,
-                            total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
+        # Step 6 — bound (optimality mode only) + projection LP
+        if mode == "optimality":
+            relax.setObjective(relax_orig_obj_expr, orig_sense)
+            _apply_time_limit(relax, time_limit, _elapsed())
+            relax.optimize()
+            kind = _solve_status_kind(relax)
+            if kind == "time_limit":
+                return _finish("time_limit", k + 1)
+            if kind == "optimal":
+                bound = relax.ObjVal
+                if _bound_proves_optimal(orig_sense, bound, U, _delta()):
+                    return _finish("optimal" if U is not None else "infeasible", k + 1)
+            elif kind == "infeasible":
+                if U is not None:
+                    bound = U  # region now empty -> U is exactly optimal, gap=0
+                return _finish("optimal" if U is not None else "infeasible", k + 1)
+            # else ("unbounded"/"other"): can't conclude from this solve;
+            # keep the previous `bound` and fall through to projection.
+
+            _set_projection_objective(relax, int_vars, z_dict)
+            _apply_time_limit(relax, time_limit, _elapsed())
+            relax.optimize()
+            kind2 = _solve_status_kind(relax)
+            if kind2 == "time_limit":
+                return _finish("time_limit", k + 1)
+            if kind2 != "optimal":
+                # Same feasible region as the bound solve just above (only
+                # the objective differs), so this almost never triggers in
+                # practice -- but if it does, the region really is empty.
+                if U is not None:
+                    bound = U
+                return _finish("optimal" if U is not None else "infeasible", k + 1)
+        else:
+            _set_projection_objective(relax, int_vars, z_dict)
+            relax.optimize()
+            if relax.Status != GRB.OPTIMAL:
+                return FPResult(False, None, k + 1, "lp_infeasible", history,
+                                total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
 
     if verbose:
         print(f"[FP] max_iter={max_iter} reached without feasible solution")
+    if mode == "optimality":
+        return _finish("max_iter", max_iter)
     return FPResult(False, None, max_iter, "max_iter", history,
                     total_cuts, n_perturbations, dict(cuts_by_type), fallback_cuts, face_probe_cuts)
