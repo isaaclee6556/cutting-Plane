@@ -269,9 +269,11 @@ class _FeasChecker:
     throughout to amortize model-build overhead.
     """
 
-    def __init__(self, model: gp.Model, int_vars: list[str]) -> None:
+    def __init__(self, model: gp.Model, int_vars: list[str], gurobi_seed: Optional[int] = None) -> None:
         lp = model.relax()
         lp.setParam("OutputFlag", 0)
+        if gurobi_seed is not None:
+            lp.setParam("Seed", gurobi_seed)
         # model.relax() carries over the original objective/sense verbatim;
         # capture both before overwriting the objective below, so evaluate()
         # can still solve the *original* objective on demand (M11).
@@ -443,6 +445,7 @@ def feasibility_pump(
     mode: str = "feasibility",
     time_limit: Optional[float] = None,
     obj_tol: Optional[float] = None,
+    gurobi_seed: Optional[int] = None,
 ) -> FPResult:
     """
     Feasibility pump with optional structural cuts, cycle-breaking
@@ -514,6 +517,12 @@ def feasibility_pump(
                            var's coefficient is an integer), else
                            max(1e-6, 1e-6 * |incumbent|). Only meaningful in
                            mode="optimality".
+    gurobi_seed           : if not None, sets Gurobi's own "Seed" parameter
+                           (M13) on both the projection/bound LP and the
+                           feasibility/evaluation checker's LP -- the only
+                           thing a run's seed controls; the perturbation RNG
+                           is driven solely by random_seed. None (default)
+                           leaves Gurobi's Seed parameter untouched.
 
     Returns
     -------
@@ -554,13 +563,15 @@ def feasibility_pump(
     # Projection LP (shared; objective + cuts accumulate here)
     relax = model.relax()
     relax.setParam("OutputFlag", 0)
+    if gurobi_seed is not None:
+        relax.setParam("Seed", gurobi_seed)
     # Captured before anything overwrites relax's objective (M11 bound step
     # and the optimality cutoff constraint both need the *original* one).
     relax_orig_obj_expr = relax.getObjective()
     orig_sense = relax.ModelSense
 
     # Feasibility checker uses original constraints only (no cuts)
-    checker = _FeasChecker(model, int_vars)
+    checker = _FeasChecker(model, int_vars, gurobi_seed=gurobi_seed)
 
     # Structure index (only used when use_structural_cuts=True)
     idx = StructureIndex(n_ivars) if cut_mode == "structural" else None

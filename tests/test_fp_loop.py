@@ -9,6 +9,7 @@ from structural_fp.io import (
     make_covering_milp,
     make_infeasible_lp_milp,
     make_fractional_cycle_milp,
+    make_random_covering_milp,
 )
 
 
@@ -244,3 +245,27 @@ class TestFeasCheckerUnboundedObjective:
         checker = _FeasChecker(model, ["x"])
         assert checker.is_feasible({"x": 1})  # x=1, y=0 satisfies x+y>=1
         assert checker.is_feasible({"x": 0})  # x=0, y>=1 (e.g. y=1) also satisfies it
+
+
+# ---------------------------------------------------------------------------
+# gurobi_seed (M13): reproducibility, no effect on the perturbation RNG
+# ---------------------------------------------------------------------------
+
+class TestGurobiSeed:
+    def test_same_seed_twice_is_fully_reproducible(self):
+        kwargs = dict(
+            mode="optimality", use_structural_cuts=True, use_face_probe=True, face_k=3,
+            max_iter=300, max_perturbations=20, perturb_scale=0.5,
+            random_seed=42, gurobi_seed=7,
+        )
+        a = feasibility_pump(make_random_covering_milp(n=18, m=12, seed=5), **kwargs)
+        b = feasibility_pump(make_random_covering_milp(n=18, m=12, seed=5), **kwargs)
+        assert (a.reason, a.iterations, a.best_obj, a.bound, a.perturbations, a.cuts_added) == \
+               (b.reason, b.iterations, b.best_obj, b.bound, b.perturbations, b.cuts_added)
+
+    def test_none_leaves_gurobi_seed_param_untouched(self):
+        # Just needs to not raise / not change behavior vs. not passing it.
+        kwargs = dict(max_iter=50, random_seed=0)
+        a = feasibility_pump(make_covering_milp(n=8), **kwargs)
+        b = feasibility_pump(make_covering_milp(n=8), gurobi_seed=None, **kwargs)
+        assert (a.feasible, a.iterations, a.reason) == (b.feasible, b.iterations, b.reason)
